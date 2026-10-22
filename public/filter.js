@@ -15,7 +15,7 @@ export function normalizeText(s) {
 }
 
 export function emptyFilters() {
-  return { q: '', plan: '', groups: new Set(), cities: new Set(), types: new Set(), styles: new Set(), amenities: new Set() };
+  return { q: '', plan: '', groups: new Set(), cities: new Set(), types: new Set(), styles: new Set(), amenities: new Set(), contact: new Set() };
 }
 
 /** Precompute a search string on every item (once per dataset). */
@@ -46,6 +46,7 @@ export function matches(it, f, tokens, skip = null) {
   if (skip !== 'types' && !anyOf(f.types, it.types)) return false;
   if (skip !== 'styles' && !anyOf(f.styles, it.styles)) return false;
   if (skip !== 'amenities' && !allOf(f.amenities, it.amenities)) return false;
+  if (skip !== 'contact' && f.contact?.size && !allOf(f.contact, it.contactKinds || [])) return false;
   return true;
 }
 
@@ -63,7 +64,7 @@ export function applyFilters(items, f) {
 export function facetCounts(items, f, facet) {
   const tokens = tokenize(f.q);
   const counts = new Map();
-  const key = { cities: 'city', plan: 'plans', groups: 'group' }[facet] || facet;
+  const key = { cities: 'city', plan: 'plans', groups: 'group', contact: 'contactKinds' }[facet] || facet;
   for (const it of items) {
     if (!matches(it, f, tokens, facet)) continue;
     const vals = Array.isArray(it[key]) ? it[key] : it[key] ? [it[key]] : [];
@@ -73,7 +74,7 @@ export function facetCounts(items, f, facet) {
 }
 
 export function activeFilterCount(f) {
-  return (f.q ? 1 : 0) + (f.plan ? 1 : 0) + f.groups.size + f.cities.size + f.types.size + f.styles.size + f.amenities.size;
+  return (f.q ? 1 : 0) + (f.plan ? 1 : 0) + f.groups.size + f.cities.size + f.types.size + f.styles.size + f.amenities.size + (f.contact?.size || 0);
 }
 
 export function inBounds(it, b) {
@@ -109,6 +110,7 @@ export function filtersToParams(f, extra = {}) {
   if (f.types.size) p.set('type', [...f.types].join(SEP));
   if (f.styles.size) p.set('style', [...f.styles].join(SEP));
   if (f.amenities.size) p.set('amenity', [...f.amenities].join(SEP));
+  if (f.contact?.size) p.set('contact', [...f.contact].join(SEP));
   for (const [k, v] of Object.entries(extra)) if (v != null && v !== '') p.set(k, v);
   return p;
 }
@@ -123,5 +125,20 @@ export function paramsToFilters(p) {
     types: set('type'),
     styles: set('style'),
     amenities: set('amenity'),
+    contact: set('contact'),
   };
+}
+
+/* ---------------------------- clusters ----------------------------- */
+
+/**
+ * What a click on a map cluster should do.
+ * 'list' → show the places in it (few places, places stacked on one spot, or already zoomed in)
+ * 'zoom' → zoom into the cluster
+ */
+export function clusterAction({ count, zoom, maxZoom = 19, spanMeters }) {
+  if (count <= 10) return 'list';
+  if (spanMeters < 150) return 'list';
+  if (zoom >= Math.min(16, maxZoom)) return 'list';
+  return 'zoom';
 }

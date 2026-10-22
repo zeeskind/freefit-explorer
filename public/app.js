@@ -1,7 +1,8 @@
 import {
   normalizeText, emptyFilters, indexItems, applyFilters, facetCounts, activeFilterCount,
-  inBounds, distanceKm, sortItems, filtersToParams, paramsToFilters,
+  inBounds, distanceKm, sortItems, filtersToParams, paramsToFilters, clusterAction,
 } from './filter.js';
+import { contactActions, websiteInfo, bookingInfo, socialLinks, searchUrl, safeUrl } from './contacts.js';
 
 /* ------------------------------ helpers ------------------------------ */
 
@@ -50,18 +51,42 @@ const state = {
 
 const map = L.map('map', { zoomControl: false, minZoom: 7, maxBounds: [[28.8, 33.2], [34.2, 36.6]] }).setView([31.95, 34.95], 8);
 L.control.zoom({ position: 'bottomleft' }).addTo(map);
-L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-  subdomains: 'abcd',
-  maxZoom: 19,
-  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
-}).addTo(map);
+// No-key tile servers. If the first one fails to deliver any tile, switch to the next.
+const TILE_SOURCES = [
+  {
+    url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    options: { maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' },
+  },
+  {
+    url: 'https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png',
+    options: {
+      subdomains: 'abc',
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, tiles: <a href="https://www.hotosm.org/">HOT</a> / <a href="https://openstreetmap.fr/">OSM France</a>',
+    },
+  },
+];
+let tileLayer = null;
+function useTiles(index) {
+  const src = TILE_SOURCES[index];
+  if (tileLayer) map.removeLayer(tileLayer);
+  let loaded = 0;
+  let failed = 0;
+  tileLayer = L.tileLayer(src.url, src.options).addTo(map);
+  tileLayer.on('tileload', () => loaded++);
+  tileLayer.on('tileerror', () => {
+    if (++failed >= 6 && loaded === 0 && index + 1 < TILE_SOURCES.length) useTiles(index + 1);
+  });
+}
+useTiles(0);
 
 const cluster = L.markerClusterGroup({
   chunkedLoading: true,
   showCoverageOnHover: false,
-  spiderfyOnMaxZoom: true,
-  disableClusteringAtZoom: 17,
-  maxClusterRadius: (z) => (z >= 14 ? 34 : 54),
+  // Clicks are handled below: small or stacked clusters open a list of their places.
+  zoomToBoundsOnClick: false,
+  spiderfyOnMaxZoom: false,
+  maxClusterRadius: (z) => (z >= 16 ? 24 : z >= 14 ? 34 : 54),
   iconCreateFunction(c) {
     const n = c.getChildCount();
     const s = n < 10 ? 34 : n < 100 ? 40 : n < 1000 ? 48 : 56;
@@ -69,6 +94,56 @@ const cluster = L.markerClusterGroup({
   },
 });
 map.addLayer(cluster);
+
+cluster.on('clusterclick', (e) => {
+  const c = e.layer;
+  const b = c.getBounds();
+  const ids = c.getAllChildMarkers().map((m) => m.options.itemId);
+  const action = clusterAction({
+    count: ids.length,
+    zoom: map.getZoom(),
+    maxZoom: map.getMaxZoom(),
+    spanMeters: b.getNorthEast().distanceTo(b.getSouthWest()),
+  });
+  if (action === 'zoom') map.flyToBounds(b, { padding: [40, 40], duration: 0.5 });
+  else openClusterList(c.getLatLng(), ids, b);
+});
+
+/** A popup listing the places inside a cluster; picking one opens its details. */
+function openClusterList(latlng, ids, bounds) {
+  const items = sortItems(ids.map((id) => state.byId.get(id)).filter(Boolean), null);
+  const box = document.createElement('div');
+  box.className = 'cluster-list';
+  const canZoom = map.getZoom() < map.getMaxZoom() && bounds.getNorthEast().distanceTo(bounds.getSouthWest()) > 30;
+  box.innerHTML = `<div class="cl-head"><strong>${nf.format(items.length)} מקומות כאן</strong>${canZoom ? '<button type="button" class="link-btn" data-act="zoom">התקרבות</button>' : ''}</div>
+    <ul>${items
+      .map((it) => {
+        const g = state.groupById.get(it.group);
+        return `<li><button type="button" data-id="${esc(it.id)}"><span class="dot" style="background:${g?.color || '#6B7A86'}"></span><span class="cl-text"><span class="cl-name">${esc(it.name)}</span><span class="cl-sub">${esc(it.address || it.city || '')}</span></span>${badges(it)}</button></li>`;
+      })
+      .join('')}</ul>`;
+  box.addEventListener('click', (ev) => {
+    if (ev.target.closest('[data-act="zoom"]')) {
+      map.closePopup();
+      map.flyToBounds(bounds, { padding: [40, 40], duration: 0.5 });
+      return;
+    }
+    const b = ev.target.closest('[data-id]');
+    if (!b) return;
+    map.closePopup();
+    select(b.dataset.id, { fromMap: true });
+  });
+  L.popup({ className: 'cluster-pop', maxWidth: 320, minWidth: 260, autoPanPadding: [24, 24] }).setLatLng(latlng).setContent(box).openOn(map);
+}
+
+/** Small contact badges for list rows and cluster lists. */
+function badges(it) {
+  const k = it.contactKinds || [];
+  const out = [];
+  if (k.includes('whatsapp')) out.push('<span class="cb wa" title="יש וואטסאפ שהעסק פרסם">WhatsApp</span>');
+  if (k.includes('website')) out.push('<span class="cb" title="יש אתר">אתר</span>');
+  return out.length ? `<span class="cbs">${out.join('')}</span>` : '';
+}
 
 const markers = new Map();
 const iconCache = new Map();
@@ -97,7 +172,7 @@ function buildMarkers() {
   markers.clear();
   for (const it of state.items) {
     if (it.lat == null) continue;
-    const m = L.marker([it.lat, it.lng], { icon: iconFor(it), keyboard: false, riseOnHover: true });
+    const m = L.marker([it.lat, it.lng], { icon: iconFor(it), keyboard: false, riseOnHover: true, itemId: it.id });
     m.bindTooltip(esc(it.name), { direction: 'top', className: 'tip' });
     m.on('click', () => select(it.id, { fromMap: true }));
     markers.set(it.id, m);
@@ -177,6 +252,13 @@ function renderFacets() {
         .join('')
     : '<span class="combo-more">אין מידע על מתקנים בנתונים</span>';
 
+  const cCounts = facetCounts(state.items, state.f, 'contact');
+  $('#contactChips').innerHTML = CONTACT_KINDS.map(([k, label]) => {
+    const n = cCounts.get(k) || 0;
+    const on = state.f.contact.has(k);
+    return `<button type="button" class="chip" aria-pressed="${on}" data-contact="${k}" ${!n && !on ? 'disabled' : ''}>${label} <span class="n">${nf.format(n)}</span></button>`;
+  }).join('');
+
   combos.forEach((c) => c.render());
   renderSummaries();
 
@@ -196,6 +278,18 @@ $('#groupChips').addEventListener('click', (e) => {
   const b = e.target.closest('[data-group]');
   if (!b) return;
   toggle(state.f.groups, b.dataset.group);
+  update();
+});
+const CONTACT_KINDS = [
+  ['whatsapp', 'וואטסאפ'],
+  ['phone', 'טלפון'],
+  ['website', 'אתר'],
+];
+const CONTACT_LABEL = Object.fromEntries(CONTACT_KINDS);
+$('#contactChips').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-contact]');
+  if (!b) return;
+  toggle(state.f.contact, b.dataset.contact);
   update();
 });
 $('#amenityChips').addEventListener('click', (e) => {
@@ -279,6 +373,7 @@ function renderActiveChips() {
   if (f.plan) chips.push(['plan', '', `מסלול ${f.plan}`]);
   for (const g of f.groups) chips.push(['groups', g, state.groupById.get(g)?.label || g]);
   for (const k of ['cities', 'types', 'styles', 'amenities']) for (const v of f[k]) chips.push([k, v, v]);
+  for (const v of f.contact) chips.push(['contact', v, `יש ${CONTACT_LABEL[v]}`]);
   $('#activeChips').innerHTML = chips
     .map(([k, v, label]) => `<button type="button" class="pill" data-k="${k}" data-v="${esc(v)}" aria-label="הסרת הסינון ${esc(label)}">${X_ICON}${esc(label)}</button>`)
     .join('');
@@ -325,7 +420,7 @@ function rowHtml(it) {
   const where = it.address || it.city || 'כתובת לא ידועה';
   return `<li class="row" tabindex="0" data-id="${esc(it.id)}" style="--g:${g?.color || '#6B7A86'}" aria-current="${state.selectedId === it.id}">
     <h3>${esc(it.name)}</h3>
-    <div class="meta">${dist}${plans}</div>
+    <div class="meta">${dist}${plans}${badges(it)}</div>
     <p class="addr">${esc(where)}${it.geo === 'city' ? ' <span class="approx">· מיקום משוער</span>' : ''}</p>
     ${tags ? `<p class="tags">${esc(tags)}</p>` : ''}
   </li>`;
@@ -444,6 +539,7 @@ async function openDetail(id) {
   const it = state.byId.get(id);
   renderDetail(it, true);
   box.hidden = false;
+  box.querySelector('.detail-close')?.focus({ preventScroll: true });
   try {
     if (!state.details.has(id)) {
       if (STATIC) {
@@ -460,6 +556,73 @@ async function openDetail(id) {
   }
 }
 
+const COPY_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg>';
+const copyBtn = (value, what) => `<button type="button" class="copy" data-copy="${esc(value)}" data-what="${esc(what)}" aria-label="העתקת ${esc(what)}" title="העתקה">${COPY_ICON}</button>`;
+
+function placeLink(it) {
+  const p = new URLSearchParams({ sel: it.id });
+  if (it.lat != null) p.set('map', `${it.lat.toFixed(5)},${it.lng.toFixed(5)},16`);
+  return `${location.origin}${location.pathname}#${p}`;
+}
+
+function renderContactSection(it, loading) {
+  if (loading && !it.contact) return '<section class="d-sec"><h3>יצירת קשר</h3><p class="muted">טוען פרטי קשר…</p></section>';
+  const actions = contactActions(it);
+  const rows = actions
+    .map((a) => `<li class="c-row ${a.kind}">
+        <a class="c-act ${a.kind}" href="${a.href}" ${a.kind === 'whatsapp' ? 'target="_blank" rel="noopener"' : ''}>
+          <span class="c-label">${a.label}</span><span class="c-val" dir="ltr">${esc(a.value)}</span>
+        </a>${copyBtn(a.copy, a.kind === 'email' ? 'כתובת המייל' : 'המספר')}
+        ${a.kind === 'whatsapp' ? `<p class="c-note">${esc(a.evidence)}${a.sourceUrl ? `, ב<a href="${esc(a.sourceUrl)}" target="_blank" rel="noopener">${esc(a.source)}</a>` : ''}.</p>` : ''}
+      </li>`)
+    .join('');
+  const hasPhone = actions.some((a) => a.kind === 'phone');
+  const hasWa = actions.some((a) => a.kind === 'whatsapp');
+  const waNote = !hasWa && hasPhone ? '<p class="c-note">העסק לא פרסם מספר וואטסאפ, אז אין כאן כפתור וואטסאפ.</p>' : '';
+  const social = socialLinks(it);
+  const socialHtml = social.length
+    ? `<div class="d-tags social">${social.map((x) => `<a href="${esc(x.url)}" target="_blank" rel="noopener">${x.label}</a>`).join('')}</div>`
+    : '';
+  const body = rows || social.length
+    ? `${rows ? `<ul class="c-list">${rows}</ul>` : ''}${waNote}${socialHtml}`
+    : '<p class="muted">לא נמצאו פרטי קשר ציבוריים בדף העסק או באתר שלו.</p>';
+  return `<section class="d-sec"><h3>יצירת קשר</h3>${body}</section>`;
+}
+
+/** Plain-language reason a business site could not be read for contacts. */
+function siteErrorText(err = '') {
+  if (/robots/.test(err)) return 'האתר מבקש מכלים אוטומטיים לא לקרוא אותו, אז פרטי הקשר נלקחו רק מדף Freefit.';
+  if (/HTTP 404|HTTP 410/.test(err)) return 'הקישור לאתר הוביל לדף שלא קיים בבדיקה האחרונה.';
+  if (/timeout|Timeout|abort/i.test(err)) return 'האתר לא ענה בזמן בבדיקה האחרונה.';
+  return 'לא הצלחנו לפתוח את האתר בבדיקה האחרונה.';
+}
+
+function renderWebsiteSection(it, loading) {
+  if (loading && !it.contact) return '';
+  const w = websiteInfo(it);
+  const booking = bookingInfo(it);
+  const bookingHtml = booking && booking.url !== w?.url ? `<p><a href="${esc(booking.url)}" target="_blank" rel="noopener">${booking.label}</a></p>` : '';
+  if (w) {
+    const st = it.siteStatus;
+    const note = st && !st.ok && w.kind !== 'booking' ? `<p class="c-note">${siteErrorText(st.error)}</p>` : '';
+    return `<section class="d-sec"><h3>${w.label}</h3>
+      <div class="site-row"><a class="action" href="${esc(w.url)}" target="_blank" rel="noopener" dir="ltr">${esc(w.host)}</a>${copyBtn(w.url, 'הקישור לאתר')}</div>${note}${bookingHtml}</section>`;
+  }
+  return `<section class="d-sec"><h3>אתר העסק</h3>
+    <p class="muted">לא נמצא אתר בדף העסק ב-Freefit.</p>
+    <p><a href="${searchUrl(it)}" target="_blank" rel="noopener">חיפוש העסק בגוגל</a></p>${bookingHtml}</section>`;
+}
+
+function renderSourcesSection(it) {
+  const freefit = safeUrl(it.url);
+  const parts = [];
+  if (freefit) parts.push(`<li><a href="${esc(freefit)}" target="_blank" rel="noopener">הדף של העסק ב-Freefit</a>${copyBtn(freefit, 'הקישור לדף ב-Freefit')}</li>`);
+  const st = it.siteStatus;
+  if (st?.ok && safeUrl(st.finalUrl || st.url)) parts.push(`<li>אתר העסק נבדק לאיתור פרטי קשר</li>`);
+  parts.push(`<li>קישור למקום הזה באפליקציה${copyBtn(placeLink(it), 'הקישור למקום')}</li>`);
+  return `<section class="d-sec sources"><h3>מקורות וקישורים</h3><ul>${parts.join('')}</ul></section>`;
+}
+
 function renderDetail(it, loading) {
   const exact = it.lat != null && it.geo !== 'city';
   const dest = exact ? `${it.lat},${it.lng}` : it.address || `${it.name} ${it.city}`;
@@ -467,28 +630,62 @@ function renderDetail(it, loading) {
   const gmaps = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(dest)}`;
   const sec = (title, body) => (body ? `<section class="d-sec"><h3>${title}</h3>${body}</section>` : '');
   const tags = (arr) => (arr?.length ? `<div class="d-tags">${arr.map((t) => `<span>${esc(t)}</span>`).join('')}</div>` : '');
-  const dist = state.origin && it.lat != null ? ` · ${distanceKm(state.origin, it).toFixed(1)} ק״מ ממך` : '';
+  const dist = state.origin && it.lat != null ? `, ${distanceKm(state.origin, it).toFixed(1)} ק״מ ממך` : '';
+  const img = safeUrl(it.image);
+  const where = it.address || it.city || 'כתובת לא ידועה';
 
   $('#detail').innerHTML = `
     <button class="detail-close" aria-label="סגירה">${X_ICON}</button>
-    ${it.image ? `<img class="detail-img" src="${esc(it.image)}" alt="" loading="lazy" onerror="this.remove()" />` : ''}
+    ${img ? `<img class="detail-img" src="${esc(img)}" alt="" loading="lazy" />` : ''}
     <div class="detail-body">
-      <h2>${esc(it.name)}</h2>
-      <p class="addr">${esc(it.address || it.city || 'כתובת לא ידועה')}${dist}</p>
+      <h2 id="detailTitle">${esc(it.name)}</h2>
+      <p class="addr"><span>${esc(where)}${dist}</span>${it.address ? copyBtn(it.address, 'הכתובת') : ''}</p>
       <div class="actions">
         <a class="action primary" href="${waze}" target="_blank" rel="noopener">ניווט ב-Waze</a>
         <a class="action" href="${gmaps}" target="_blank" rel="noopener">Google Maps</a>
-        ${it.url ? `<a class="action" href="${esc(it.url)}" target="_blank" rel="noopener">הדף ב-Freefit</a>` : ''}
       </div>
       ${it.geo === 'city' ? '<p class="approx-note">הסיכה מסמנת את מרכז העיר. הכתובת המדויקת עוד לא אותרה, אז כדאי לנווט לפי הכתובת.</p>' : ''}
+      ${renderContactSection(it, loading)}
+      ${renderWebsiteSection(it, loading)}
       ${sec('מסלולים שכוללים את המקום', it.plans?.length ? `<div class="d-tags">${it.plans.map((p) => `<span dir="ltr">${p}</span>`).join('')}</div>` : '')}
-      ${sec('שעות פתיחה', it.hours?.length ? `<ul>${it.hours.map((h) => `<li>${esc(h)}</li>`).join('')}</ul>` : loading ? '<p>טוען…</p>' : '')}
+      ${sec('שעות פתיחה', it.hours?.length ? `<ul>${it.hours.map((h) => `<li>${esc(h)}</li>`).join('')}</ul>` : loading ? '<p class="muted">טוען…</p>' : '')}
       ${sec('פעילות', tags(it.types))}
       ${sec('סגנונות אימון', tags(it.styles))}
       ${sec('מתקנים', tags(it.amenities))}
       ${sec('חשוב לדעת', it.notes ? `<p class="notes clamped">${esc(it.notes)}</p><button class="link-btn" data-act="more">הצגת הכול</button>` : '')}
       ${sec('על המקום', it.description ? `<p class="notes clamped">${esc(it.description)}</p><button class="link-btn" data-act="more">הצגת הכול</button>` : '')}
+      ${renderSourcesSection(it)}
     </div>`;
+  $('#detail .detail-img')?.addEventListener('error', (e) => e.target.remove());
+}
+
+/* ------------------------------- copy -------------------------------- */
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    // Fallback for http:// pages and older browsers.
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;opacity:0;top:0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  }
+}
+
+let toastTimer;
+function toast(msg) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (t.hidden = true), 2200);
 }
 
 function closeDetail() {
@@ -497,8 +694,14 @@ function closeDetail() {
   saveHash();
 }
 
-$('#detail').addEventListener('click', (e) => {
+$('#detail').addEventListener('click', async (e) => {
   if (e.target.closest('.detail-close')) return closeDetail();
+  const c = e.target.closest('[data-copy]');
+  if (c) {
+    const ok = await copyText(c.dataset.copy);
+    toast(ok ? `הועתק: ${c.dataset.what}` : 'ההעתקה לא הצליחה. סמנו והעתיקו ידנית.');
+    return;
+  }
   const more = e.target.closest('[data-act="more"]');
   if (more) {
     more.previousElementSibling.classList.remove('clamped');
@@ -536,7 +739,7 @@ $('#locateBtn').addEventListener('click', () => {
     renderList();
     return;
   }
-  if (!navigator.geolocation) return alert('הדפדפן לא תומך באיתור מיקום.');
+  if (!navigator.geolocation) return toast('הדפדפן לא תומך באיתור מיקום.');
   btn.setAttribute('aria-busy', 'true');
   navigator.geolocation.getCurrentPosition(
     (pos) => {
@@ -550,7 +753,7 @@ $('#locateBtn').addEventListener('click', () => {
     },
     (err) => {
       btn.removeAttribute('aria-busy');
-      alert(err.code === 1 ? 'כדי למיין לפי מרחק, צריך לאשר גישה למיקום בהגדרות הדפדפן.' : 'לא הצלחנו לאתר את המיקום. נסו שוב בעוד רגע.');
+      toast(err.code === 1 ? 'כדי למיין לפי מרחק, צריך לאשר גישה למיקום בהגדרות הדפדפן.' : 'לא הצלחנו לאתר את המיקום. נסו שוב בעוד רגע.');
     },
     { enableHighAccuracy: true, timeout: 12000, maximumAge: 60000 }
   );
@@ -760,4 +963,4 @@ setSheet('half');
 })();
 
 // Exposed for debugging in the browser console.
-window.__ff = { state, map, update };
+window.__ff = { state, map, update, select };

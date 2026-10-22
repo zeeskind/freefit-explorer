@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { startMock, makeClubs } from './mockFreefit.js';
+import { startMock, makeClubs, expectedContacts } from './mockFreefit.js';
 import { DataService } from '../server/dataService.js';
 import { createApp } from '../server/index.js';
 
@@ -118,6 +118,8 @@ test('HTTP API serves list, detail, status and ETag', async () => {
     const list = await res.json();
     assert.equal(list.items.length, 30);
     assert.ok(!('notes' in list.items[0]), 'list payload is light');
+    assert.ok(!('contact' in list.items[0]), 'contacts only in details');
+    assert.ok(Array.isArray(list.items[0].contactKinds));
     assert.ok(list.groups.length >= 7);
 
     const etag = res.headers.get('etag');
@@ -126,13 +128,104 @@ test('HTTP API serves list, detail, status and ETag', async () => {
 
     const detail = await (await fetch(`${base}/api/locations/${list.items[0].id}`)).json();
     assert.ok(detail.hours.length);
+    assert.ok(detail.contact && Array.isArray(detail.contact.phones));
     assert.equal((await fetch(`${base}/api/locations/nope`)).status, 404);
 
-    for (const asset of ['/', '/app.js', '/filter.js', '/styles.css', '/vendor/leaflet/leaflet.js', '/vendor/markercluster/leaflet.markercluster.js']) {
+    for (const asset of ['/', '/app.js', '/filter.js', '/contacts.js', '/styles.css', '/vendor/leaflet/leaflet.js', '/vendor/markercluster/leaflet.markercluster.js']) {
       assert.equal((await fetch(base + asset)).status, 200, asset);
     }
   } finally {
     server.close();
+    await mock.close();
+  }
+});
+
+test('contacts: each business gets its own public contacts, never Freefit\'s', async () => {
+  const { mock, service } = await build('rest', 42);
+  try {
+    const items = service.dataset.items;
+    const byId = new Map(items.map((i) => [i.id, i]));
+    const freefitNumber = '+972559458809';
+    for (const club of mock.clubs) {
+      const it = byId.get(String(club.id));
+      const exp = expectedContacts(club);
+      const c = it.contact;
+      const wa = c.whatsapp.map((w) => w.e164).sort();
+      assert.deepEqual(wa, [...exp.whatsapp].sort(), `${it.name}: WhatsApp numbers`);
+      for (const p of exp.phones) assert.ok(c.phones.some((x) => x.e164 === p), `${it.name}: phone ${p}`);
+      if (exp.evidence === 'label' || exp.evidence === 'link') {
+        if ((club.id - 29000) % 7 !== 3) assert.ok(c.whatsapp.every((w) => w.evidence === exp.evidence), `${it.name}: evidence ${exp.evidence}`);
+      }
+      // Freefit's own contacts (footer, floating button, "דברו איתנו") never reach a business.
+      assert.ok(![...c.phones, ...c.whatsapp].some((x) => x.e164 === freefitNumber), `${it.name}: no Freefit number`);
+      assert.ok(!c.emails.some((e) => e.email.endsWith('@freefit.co.il')), `${it.name}: no Freefit email`);
+      assert.ok(!Object.values(c.social).some((u) => /facebook\.com\/Freefit/i.test(u)), `${it.name}: no Freefit social`);
+
+      if (exp.website) {
+        assert.equal(it.siteStatus.ok, true, `${it.name}: site crawled`);
+        assert.ok(c.websites.some((w) => w.kind === 'website' && /\/biz\//.test(w.url)));
+        assert.ok(c.emails.some((e) => e.email === exp.email), `${it.name}: email from the contact page`);
+        assert.ok(c.whatsapp.find((w) => w.e164 === exp.whatsapp[0]).source === 'site');
+        assert.equal(c.whatsapp.find((w) => w.e164 === exp.whatsapp[0]).evidence, 'link', 'floating wa link on the site');
+        assert.equal(c.whatsapp.find((w) => w.e164 === exp.whatsapp[1]).evidence, 'label', '"WhatsApp 053…" on the contact page');
+        assert.ok(!c.phones.some((p) => p.e164 === '+972500000000'), 'numbers inside <script> ignored');
+      }
+      if (exp.instagram) assert.match(c.social.instagram, /instagram\.com\/club\d+\.life/);
+      if (exp.facebook) assert.match(c.social.facebook, /facebook\.com\/club\d+/);
+      if (exp.websiteBlocked) {
+        assert.equal(it.siteStatus.ok, false);
+        assert.equal(it.siteStatus.error, 'blocked by robots.txt');
+        assert.ok(!c.phones.some((p) => p.e164 === '+972501112222'), 'blocked site not read');
+      }
+      if (exp.websiteDead) assert.equal(it.siteStatus.ok, false);
+      if (exp.booking) assert.ok(c.websites.some((w) => w.kind === 'booking'));
+      assert.equal(it.contactKinds.includes('whatsapp'), exp.whatsapp.length > 0);
+    }
+    assert.ok(service.status.log.some((l) => /Ignored site-wide contacts: .*972559458809/.test(l)), 'floating Freefit button detected as site-wide');
+  } finally {
+    await mock.close();
+  }
+});
+
+test('business websites are cached between runs', async () => {
+  const { mock, service, dataDir } = await build('norest', 21);
+  try {
+    const first = mock.stats.byPrefix.biz || 0;
+    assert.ok(first > 0, 'sites were visited');
+    const again = new DataService({ ...service.cfg, dataDir });
+    await again.geocoder.load();
+    await again.refresh();
+    await again.geocoding;
+    assert.equal(mock.stats.byPrefix.biz || 0, first, 'no new site requests');
+    const biz = again.dataset.items.filter((i) => i.siteStatus?.ok);
+    assert.ok(biz.length > 0 && biz.every((i) => i.contact.emails.length), 'cached contacts still applied');
+  } finally {
+    await mock.close();
+  }
+});
+
+test('geocoding falls back to Photon when Nominatim refuses every request', async () => {
+  const mock = await startMock({ mode: 'rest', clubs: makeClubs(12) });
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ff-'));
+  try {
+    const service = new DataService({
+      baseUrl: mock.url,
+      dataDir,
+      sourceMode: 'auto',
+      cacheTtlHours: 24,
+      scrapeConcurrency: 6,
+      requestDelayMs: 0,
+      crawlSites: false,
+      geocode: { enabled: true, endpoint: `${mock.url}/geocode-blocked`, fallbackEndpoint: `${mock.url}/photon`, minIntervalMs: 0, userAgent: 'test' },
+    });
+    await service.geocoder.load();
+    await service.refresh();
+    await service.geocoding;
+    assert.ok(service.dataset.items.every((i) => i.lat != null), 'every place on the map');
+    const summary = service.geocoder.summary();
+    assert.match(summary, /nominatim HTTP 429/);
+    assert.match(summary, /stopped using nominatim/);
+  } finally {
     await mock.close();
   }
 });

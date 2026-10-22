@@ -2,6 +2,7 @@ import * as cheerio from 'cheerio';
 import { request, absoluteUrl, createLimiter } from '../http.js';
 import { clean, safeDecode, uniq } from '../normalize.js';
 import { inIsrael } from '../config.js';
+import { extractContacts } from '../contacts.js';
 
 /* ------------------------------------------------------------------ */
 /* /locations/ page: the filter dropdowns hold every city, type, etc. */
@@ -325,9 +326,45 @@ export function parseClubPage(html, url, { termNames = {} } = {}) {
   const coords = findCoordinates(html);
   if (coords) Object.assign(rec, coords, { geo: 'site' });
 
+  rec.contact = clubPageContacts($, url, content, rec.name);
+
   rec.types = uniq(rec.types);
   rec.styles = uniq(rec.styles);
   return rec;
+}
+
+
+const CHROME = 'header,footer,nav,form,aside,.elementor-location-header,.elementor-location-footer';
+
+/**
+ * Public contacts of the business on its Freefit page: links and text from the page's own
+ * content only (no site header/footer/menus/forms, and not Freefit's "דברו איתנו" section).
+ */
+function clubPageContacts($, url, content, name) {
+  const heading = $('h1,h2,h3').filter((_, h) => /^דברו איתנו$/.test(clean($(h).text()))).first();
+  if (heading.length) {
+    const section = heading.closest('section,.elementor-section,.e-con,.e-parent,.elementor-top-section');
+    const holdsBusiness = section.find('h1,h2,h3').filter((_, h) => clean($(h).text()) === name).length > 0;
+    if (section.length && !holdsBusiness) section.find('a').attr('data-ff-skip', '1');
+  }
+  const root = $('main').length ? $('main') : $('body');
+  const links = root
+    .find('a[href]')
+    .filter((_, a) => !$(a).attr('data-ff-skip') && !$(a).closest(CHROME).length)
+    .map((_, a) => {
+      let href = $(a).attr('href');
+      try {
+        href = new URL(href, url).toString();
+      } catch {}
+      return { href, text: clean(`${$(a).text()} ${$(a).attr('aria-label') || ''} ${$(a).attr('title') || ''}`) };
+    })
+    .get();
+  const text = content.map((b) => b.text).join('\n');
+  let host = '';
+  try {
+    host = new URL(url).hostname;
+  } catch {}
+  return extractContacts({ links, text, source: 'freefit', sourceUrl: url, ownHosts: [host] });
 }
 
 /** Fetch and parse many club pages with bounded concurrency. */

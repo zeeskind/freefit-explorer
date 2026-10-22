@@ -12,6 +12,8 @@
  * }
  */
 
+import { emptyContact, contactKinds } from './contacts.js';
+
 export const PLAN_ORDER = ['SMART', 'PLUS', 'PRO', 'MAX'];
 
 // Facility terms that live inside Freefit's "activity style" list.
@@ -198,11 +200,16 @@ export function finalizeRecord(r, knownCities = []) {
     notes: (r.notes || '').trim(),
     description: (r.description || '').trim(),
     image: r.image || '',
+    contact: r.contact || emptyContact(),
+    contactKinds: contactKinds(r.contact),
+    siteStatus: r.siteStatus || null,
   };
 }
 
 /** Light version for the list endpoint (keeps payloads small). */
 export function toListItem(r) {
-  const { notes, description, hours, ...rest } = r;
+  const { notes, description, hours, contact, siteStatus, ...rest } = r;
   return rest;
 }
+
+export const DETAIL_FIELDS = ['notes', 'description', 'hours', 'contact', 'siteStatus'];

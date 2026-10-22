@@ -51,6 +51,59 @@ const encSlug = (s) => encodeURIComponent(s).toLowerCase();
 // What WordPress's sanitize_html_class() does to a percent-encoded slug.
 const classSlug = (s) => encodeURIComponent(wpSlugify(s)).toLowerCase().replace(/%/g, '');
 
+
+const pad = (n, w) => String(n).padStart(w, '0');
+
+/** Expected contacts per club, used by the tests. */
+export function expectedContacts(c) {
+  const i = c.id - 29000;
+  const v = i % 7;
+  const plain = (x) => x.replace(/\D/g, '');
+  switch (v) {
+    case 0: return { whatsapp: [`+97252${pad(i, 7)}`], phones: [`+9723${pad(i, 7)}`], evidence: 'label' };
+    case 1: return { whatsapp: [`+97254${pad(i, 7)}`], phones: [], evidence: 'link' };
+    case 2: return { whatsapp: [], phones: [`+97250${pad(i, 7)}`] };
+    case 3: return { whatsapp: [`+97258${pad(i, 7)}`, `+97253${pad(i, 7)}`], phones: [`+9729${pad(i, 7)}`], email: `info${i}@biz.co.il`, website: true, evidence: 'link' };
+    case 4: return { whatsapp: [], phones: [], instagram: true, facebook: true };
+    case 5: return { whatsapp: [], phones: [`+9724${pad(i, 7)}`], websiteBlocked: true };
+    default: return { whatsapp: [], phones: [], websiteDead: true, booking: true };
+  }
+}
+
+function contactHtml(c, base) {
+  const i = c.id - 29000;
+  const site = base.replace('127.0.0.1', 'localhost'); // a different host = "external" site
+  switch (i % 7) {
+    case 0:
+      return `<div class="elementor-widget-text-editor"><p>להזמנות: <a href="tel:03-${pad(i, 7)}">03-${pad(i, 7)}</a></p><p>וואטסאפ: 052-${pad(i, 7)}</p></div>`;
+    case 1:
+      return `<a class="elementor-button" href="https://wa.me/97254${pad(i, 7)}?text=%D7%94%D7%99%D7%99">שלחו לנו הודעה</a>`;
+    case 2:
+      return `<div class="elementor-widget-text-editor"><p>טלפון: 050-${pad(i, 7)}</p></div>`;
+    case 3:
+      return `<a class="elementor-button" href="${site}/biz/${i}/">לאתר שלנו</a>`;
+    case 4:
+      return `<div class="elementor-widget-text-editor"><p>קישור לדף האינסטגרם: https://www.instagram.com/club${i}.life/ קישור לדף הפייסבוק: https://www.facebook.com/club${i}</p></div>`;
+    case 5:
+      return `<div class="elementor-widget-text-editor"><p>לא זמינים בוואטסאפ, טלפון 04-${pad(i, 7)}</p></div><a href="${site}/blocked/${i}/">אתר</a>`;
+    default:
+      return `<a href="${site}/gone/${i}/">אתר</a> <a href="https://app.arboxapp.com/club${i}">הזמנת שיעור</a>`;
+  }
+}
+
+function bizHome(i) {
+  return `<!doctype html><html><body><header><nav><a href="/biz/${i}/contact/">צור קשר</a></nav></header>
+<main><h1>Studio ${i}</h1><p>Best studio in town.</p></main>
+<footer><p>טלפון: <a href="tel:+9729${pad(i, 7)}">09-${pad(i, 7)}</a></p><p>Built by <a href="https://www.wix.com/">Wix</a></p></footer>
+<a class="floating-wa" href="https://api.whatsapp.com/send?phone=97258${pad(i, 7)}" aria-label="WhatsApp"></a>
+<script>var phone = "050-0000000";</script></body></html>`;
+}
+function bizContact(i) {
+  return `<!doctype html><html><body><main><h1>צור קשר</h1>
+<p>מייל: <a href="mailto:info${i}@biz.co.il">info${i}@biz.co.il</a></p>
+<p>WhatsApp 053-${pad(i, 7)}</p></main></body></html>`;
+}
+
 function clubPage(c, base) {
   const routeLinks = c.plans.map((p) => `<a class="elementor-button" href="${base}/locations/?route=${p.toLowerCase()}">${p}</a>`).join(' ');
   const taxClasses = [...c.types.map((t) => `club-type-${classSlug(t)}`), ...c.styles.map((s) => `club-activity-${classSlug(s)}`)].join(' ');
@@ -76,6 +129,8 @@ function clubPage(c, base) {
   <div class="elementor-widget-text-editor"><p>ימים א׳-ה׳: 06:00-22:00</p><p>ימי שישי: 07:30-14:30</p><p>ימי שבת: 10:30-20:00</p></div>
   <h2 class="elementor-heading-title">חשוב לדעת</h2>
   <div class="elementor-widget-text-editor"><p>${notes}</p></div>
+  ${contactHtml(c, base)}
+  <div class="ff-float"><a href="https://wa.me/972559458809" aria-label="WhatsApp">💬</a></div>
   <h3 class="elementor-heading-title">מסלולים</h3>${routeLinks}
   <h3 class="elementor-heading-title">כתובת</h3>
   <!-- mobile duplicate, as on the real page -->
@@ -84,9 +139,12 @@ function clubPage(c, base) {
   <h3 class="elementor-heading-title">שעות פתיחה</h3><p>ימים א׳-ה׳: 06:00-22:00</p>
   ${c.coords && c.id % 4 === 0 ? `<iframe src="https://maps.google.com/maps?q=${c.coords[0]},${c.coords[1]}&z=15&output=embed"></iframe>` : ''}
 </div>
-<h2 class="elementor-heading-title">דברו איתנו</h2><form><input name="name"><select name="subject"><option>הצטרפות כארגון</option></select></form>
+<section class="elementor-section"><h2 class="elementor-heading-title">דברו איתנו</h2>
+  <p>שירות לקוחות: <a href="tel:0559458809">055-9458809</a> <a href="mailto:service@freefit.co.il">service@freefit.co.il</a></p>
+  <form><input name="name"><select name="subject"><option>הצטרפות כארגון</option></select></form></section>
 </main>
-<footer class="elementor-location-footer"><img src="${base}/wp-content/uploads/2026/05/footer-logo.webp"><a href="#">תקנון</a></footer>
+<footer class="elementor-location-footer"><img src="${base}/wp-content/uploads/2026/05/footer-logo.webp"><a href="#">תקנון</a>
+<a href="https://wa.me/972559458809">אנחנו זמינים בווטסאפ 0559458809</a> <a href="https://www.facebook.com/Freefit/">Facebook</a></footer>
 </body></html>`;
 }
 
@@ -126,6 +184,24 @@ export function startMock({ mode = 'rest', clubs = makeClubs(), perPage = 15 } =
       res.writeHead(status, { 'Content-Type': type, ...headers });
       res.end(typeof body === 'string' ? body : JSON.stringify(body));
     };
+
+    // Business websites (requested via the "localhost" host name)
+    if (path === '/robots.txt') return send(200, 'User-agent: *\nDisallow: /blocked/\n', 'text/plain');
+    let bm = path.match(/^\/biz\/(\d+)\/(contact\/)?$/);
+    if (bm) return send(200, bm[2] ? bizContact(Number(bm[1])) : bizHome(Number(bm[1])));
+    if (/^\/(blocked|gone)\//.test(path)) return send(path.startsWith('/blocked') ? 200 : 404, '<html><body><a href="tel:0501112222">x</a></body></html>');
+
+    // Geocoder that refuses every request (like Nominatim blocking a cloud IP)
+    if (path === '/geocode-blocked') return send(429, 'Too Many Requests', 'text/plain');
+
+    // Fake Photon (GeoJSON)
+    if (path === '/photon') {
+      const q = u.searchParams.get('q') || '';
+      const city = Object.keys(CITIES).find((c) => q.includes(c));
+      if (!city) return send(200, { features: [] }, 'application/json');
+      const [lat, lng] = CITIES[city];
+      return send(200, { features: [{ geometry: { coordinates: [lng + 0.002, lat + 0.002] } }] }, 'application/json');
+    }
 
     // Fake Nominatim
     if (path === '/geocode') {

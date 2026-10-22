@@ -33,10 +33,17 @@ export const config = {
   geocode: {
     enabled: env.GEOCODE !== 'off',
     endpoint: env.GEOCODE_URL || 'https://nominatim.openstreetmap.org/search',
+    // Second no-key OpenStreetMap geocoder; "off" disables it.
+    fallbackEndpoint: env.GEOCODE_FALLBACK_URL || 'https://photon.komoot.io/api/',
     // Nominatim's usage policy allows at most one request per second.
     minIntervalMs: num(env.GEOCODE_INTERVAL_MS, 1100),
     userAgent: env.GEOCODE_USER_AGENT || 'FreefitExplorer/1.0 (personal use; https://github.com/)',
   },
+
+  // Visit each business's own website for contact details ("off" to skip).
+  crawlSites: env.CRAWL_SITES !== 'off',
+  siteConcurrency: num(env.SITE_CONCURRENCY, 6),
+  siteCacheDays: num(env.SITE_CACHE_DAYS, 14),
 
   openBrowser: env.OPEN_BROWSER ? env.OPEN_BROWSER !== '0' : !env.DOCKER,
 };

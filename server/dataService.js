@@ -3,7 +3,9 @@ import path from 'node:path';
 import { request } from './http.js';
 import { loadFromWpRest } from './sources/wpRest.js';
 import { parseLocationsFilters, discoverClubUrls, crawlMemberships, scrapeClubPages, wpSlugify } from './sources/html.js';
-import { finalizeRecord, mergeRecords, slugFromUrl, safeDecode, GROUPS, OTHER_GROUP, PLAN_ORDER } from './normalize.js';
+import { finalizeRecord, mergeRecords, slugFromUrl, safeDecode, toListItem, GROUPS, OTHER_GROUP, PLAN_ORDER } from './normalize.js';
+import { stripSiteWide, mergeContacts, primaryWebsite } from './contacts.js';
+import { SiteCache, crawlSites } from './sources/sites.js';
 import { Geocoder, addressQueries } from './geocode.js';
 
 const log = (...a) => console.log(`[${new Date().toISOString().slice(11, 19)}]`, ...a);
@@ -18,6 +20,7 @@ export class DataService {
     this.abortGeocode = false;
     this.status = { state: 'idle', phase: null, done: 0, total: 0, error: null, log: [] };
     this.geocoder = new Geocoder({ ...cfg.geocode, cacheFile: path.join(cfg.dataDir, 'geocode-cache.json') });
+    this.siteCache = new SiteCache(path.join(cfg.dataDir, 'sites-cache.json'), cfg.siteCacheDays ?? 14);
   }
 
   /* ----------------------------- lifecycle ----------------------------- */
@@ -153,7 +156,8 @@ export class DataService {
     this.#publish(records, source, knownCities);
 
     // Enrich from club pages where key details are missing.
-    const needDetails = records.filter((r) => r.url && (!r.address || !r.plans?.length || !r.hours?.length || (!r.types?.length && !r.styles?.length)));
+    // Every club page is read: it is the source of public contact details.
+    const needDetails = records.filter((r) => r.url && !r.contact);
     if (needDetails.length) {
       this.note(`Reading ${needDetails.length} club pages for details`);
       const pages = await scrapeClubPages(
@@ -179,10 +183,47 @@ export class DataService {
       records = records.map((r) => (membership.has(r.url) ? mergeRecords(r, { [field]: membership.get(r.url) }) : r));
     }
 
+    // Contacts that repeat across many pages belong to Freefit itself, not the business.
+    const stripped = stripSiteWide(records);
+    records = stripped.records;
+    if (stripped.removed.length) this.note(`Ignored site-wide contacts: ${stripped.removed.join(', ')}`);
+
+    // Visit each business's own website for more contact details.
+    if (this.cfg.crawlSites !== false) records = await this.#enrichFromSites(records);
+
     this.#publish(records, source, knownCities);
     this.setStatus({ state: 'idle', phase: null, done: 0, total: 0 });
     this.note(`Done: ${this.dataset.items.length} locations`);
     this.startGeocoding();
+  }
+
+  async #enrichFromSites(records) {
+    await this.siteCache.load();
+    const targets = new Map();
+    for (const r of records) {
+      const w = primaryWebsite(r.contact);
+      if (w && w.kind !== 'booking') targets.set(r.url, w.url);
+    }
+    if (!targets.size) return records;
+    this.note(`Visiting ${new Set(targets.values()).size} business websites for contact details`);
+    const results = await crawlSites([...targets.values()], {
+      cache: this.siteCache,
+      concurrency: this.cfg.siteConcurrency ?? 6,
+      onProgress: this.progress,
+      log: (m) => this.note(m),
+    });
+    await this.siteCache.save().catch((e) => this.note(`Could not save site cache: ${e.message}`));
+    return records.map((r) => {
+      const site = targets.get(r.url);
+      if (!site) return r;
+      const res = results.get(site);
+      const fromSite = res?.contact ? { ...res.contact, websites: [] } : null; // keep the link Freefit lists
+      return {
+        ...r,
+        contact: mergeContacts(r.contact, fromSite),
+        siteStatus: { url: site, ok: !!res?.ok, finalUrl: res?.finalUrl || null, error: res?.ok ? null : res?.error || 'unreachable' },
+      };
+    });
   }
 
   #publish(records, source, knownCities) {
@@ -211,11 +252,23 @@ export class DataService {
     this.#save();
   }
 
-  async #save() {
+  /** Resolves when every pending write of locations.json has finished. */
+  async flush() {
+    while (this.savePromise) await this.savePromise;
+  }
+
+  #save() {
     if (this.saving) {
       this.saveAgain = true;
-      return;
+      return this.savePromise;
     }
+    this.savePromise = this.#write().finally(() => {
+      this.savePromise = null;
+    });
+    return this.savePromise;
+  }
+
+  async #write() {
     this.saving = true;
     try {
       await fs.mkdir(path.dirname(this.file), { recursive: true });
@@ -228,7 +281,7 @@ export class DataService {
       this.saving = false;
       if (this.saveAgain) {
         this.saveAgain = false;
-        this.#save();
+        await this.#write();
       }
     }
   }
@@ -300,6 +353,7 @@ export class DataService {
       }
     }
     if (changed) this.#touch();
+    this.note(this.geocoder.summary());
     this.note('Geocoding finished');
   }
 
@@ -314,7 +368,7 @@ export class DataService {
       source,
       groups: [...GROUPS.map(({ kw, ...g }) => g), OTHER_GROUP],
       plans: PLAN_ORDER,
-      items: items.map(({ notes, description, hours, ...light }) => light),
+      items: items.map(toListItem),
     };
   }
 

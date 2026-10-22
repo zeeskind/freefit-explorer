@@ -48,6 +48,11 @@
           <div class="chips" id="groupChips"></div>
         </fieldset>
 
+        <fieldset class="f-block">
+          <legend>יצירת קשר</legend>
+          <div class="chips" id="contactChips"></div>
+        </fieldset>
+
         <div class="f-block disc" data-facet="cities">
           <button type="button" class="disc-btn" aria-expanded="false" aria-controls="cityCombo">
             <span class="legend">עיר</span><span class="disc-sum" data-sum="cities">הכל</span><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
@@ -105,7 +110,8 @@
       <div class="map-progress" id="mapProgress" hidden></div>
     </main>
 
-    <article class="detail" id="detail" hidden aria-live="polite"></article>
+    <article class="detail" id="detail" hidden aria-labelledby="detailTitle"></article>
+    <div class="toast" id="toast" role="status" hidden></div>
   </div>
 
   <div class="boot" id="boot" hidden>

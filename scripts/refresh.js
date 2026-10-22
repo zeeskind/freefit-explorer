@@ -24,12 +24,15 @@ clearInterval(timer);
 await service.geocoder.save();
 
 // Wait for the last save, then make sure the file really exists.
-await new Promise((r) => setTimeout(r, 500));
+await service.flush();
 const file = path.join(config.dataDir, 'locations.json');
 try {
   const saved = JSON.parse(await fs.readFile(file, 'utf8'));
   const onMap = saved.items.filter((i) => i.lat != null).length;
+  const has = (k) => saved.items.filter((i) => i.contactKinds?.includes(k)).length;
   console.log(`\nDone. ${saved.items.length} locations saved to ${file}, ${onMap} on the map.`);
+  console.log(`Contacts: ${has('whatsapp')} with WhatsApp (published by the business), ${has('phone')} with a phone, ${has('email')} with email, ${has('website')} with a website.`);
+  console.log(service.geocoder.summary());
   if (saved.items.length && onMap === 0) {
     console.warn('Warning: no address could be placed on the map. The geocoding service may be blocking this machine.');
   }

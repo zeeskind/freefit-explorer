@@ -3,9 +3,10 @@
 A fast, map-first replacement for the Freefit locations page
 (https://website.freefit.co.il/locations/), for personal use.
 
-Every Freefit venue on one clustered map. Filtering is instant and happens entirely
-in your browser: plan, place type, city, activity, training style, amenities and live
-text search. Hebrew, right-to-left, works on desktop and mobile.
+Every Freefit venue on one clustered map, with each business's public contact details.
+Filtering is instant and happens entirely in your browser: plan, place type, contact
+options, city, activity, training style, amenities and live text search. Hebrew,
+right-to-left, works on desktop and mobile. No API keys anywhere.
 
 ## Start it
 
@@ -28,6 +29,9 @@ You can also press "רענון נתונים" at the bottom of the panel.
 **Map pins:** Freefit's pages show addresses, not coordinates. So the app looks each
 address up on OpenStreetMap. Their free service allows one lookup per second, so:
 
+- if OpenStreetMap's main geocoder (Nominatim) refuses requests, which happens from
+  cloud machines such as GitHub's, the app switches to Photon, a second free
+  OpenStreetMap geocoder, by itself;
 - within a few minutes, every place gets a pin in the middle of its city
   (hollow pins, marked "מיקום משוער");
 - over roughly 45 minutes, pins move to the exact address. You can use the app
@@ -44,10 +48,30 @@ lookups take about 45 minutes the first time), so that runs elsewhere:
 - **By hand:** `npm run refresh`, then `npm run build:site`, then drag the `dist`
   folder onto https://app.netlify.com/drop.
 - **Automatically:** push this project to GitHub. `.github/workflows/update-data.yml`
-  collects fresh data every night and commits it to `data/`, and Netlify (connected to
+  collects fresh data every night and commits it to `data/` (locations, address cache,
+  website cache), and Netlify (connected to
   the repo, settings in `netlify.toml`) rebuilds on every commit.
 
 The static site has no "רענון נתונים" button; data updates come from the steps above.
+
+## Contact details
+
+For every business, the app reads its public Freefit page and, when that page links to
+the business's own website, that site's home page plus one contact page. It collects
+phone numbers, WhatsApp numbers, emails, the website, booking pages and social profiles.
+
+- **WhatsApp is shown only when the business itself published it as WhatsApp:** a
+  WhatsApp link (`wa.me`, `api.whatsapp.com`), or a number written next to the word
+  וואטסאפ / WhatsApp. Each WhatsApp button says which of the two it was and where.
+- **A plain phone number never becomes a WhatsApp button.** WhatsApp has no public way
+  to check whether a number has an account; the only way is to automate a logged-in
+  WhatsApp account, which breaks WhatsApp's terms. So the app relies on what the
+  business published.
+- Freefit's own contact details (its chat button, footer, "דברו איתנו" section) are
+  removed automatically, including anything that repeats across many business pages.
+- Websites whose robots.txt asks crawlers to stay out are not read; the link to the
+  site is still shown.
+- Website results are cached for 14 days in `data/sites-cache.json`.
 
 ## Using it
 
@@ -57,6 +81,11 @@ The static site has no "רענון נתונים" button; data updates come from 
   amenities, where a place must have all of the ones you pick.
 - **Numbers on every option** show exactly how many results you'd get if you picked it.
   Options that would give zero results are greyed out.
+- **Clusters:** clicking a small cluster, or one where places sit on the same spot,
+  opens a list of its places; pick one to see its details. Large clusters zoom in.
+- **Details card:** contact buttons (WhatsApp, call, email), the business website, social
+  profiles, navigation, and copy buttons for the address, numbers, email and links.
+  When no website was found, there's a search link instead.
 - **"רק באזור המפה"** makes the list follow the map. Turn it off to list every result.
 - **Locate button** (top of the map) sorts the list by distance from you.
 - **The URL keeps your state.** Bookmark or share a link to come back to the same
@@ -109,12 +138,15 @@ server/
   dataService.js    picks a source, enriches, saves, runs address lookup
   sources/wpRest.js WordPress REST source
   sources/html.js   sitemap, category pages, club page and filter-list parsing
+  sources/sites.js  business websites: robots.txt, home + contact page, cache
+  contacts.js       phones, WhatsApp evidence, emails, links, site-wide filtering
   normalize.js      common data shape, colour groups, amenities, cities
-  geocode.js        rate-limited OpenStreetMap lookup with disk cache
+  geocode.js        Nominatim + Photon address lookup with disk cache
   http.js           retries, timeouts, concurrency limit
 public/
   index.html, styles.css, app.js   the app
-  filter.js         search and filter logic (also used by the tests)
+  filter.js         search, filter and cluster logic (also used by the tests)
+  contacts.js       contact buttons and safe links (also used by the tests)
 scripts/
   probe.js          connection report
   refresh.js        rebuild the data without starting the server
@@ -143,6 +175,10 @@ Set these as environment variables, e.g. `PORT=8080 npm start`.
 | `SCRAPE_CONCURRENCY` | `4` | parallel requests to Freefit |
 | `GEOCODE` | on | set to `off` to skip address lookup |
 | `GEOCODE_URL` | OpenStreetMap Nominatim | any Nominatim-compatible service |
+| `GEOCODE_FALLBACK_URL` | Photon (`photon.komoot.io`) | second geocoder; `off` to disable |
+| `CRAWL_SITES` | on | set to `off` to skip visiting business websites |
+| `SITE_CONCURRENCY` | `6` | parallel requests to business websites |
+| `SITE_CACHE_DAYS` | `14` | how long website results are reused |
 | `DATA_DIR` | `./data` | where the cache lives |
 | `FREEFIT_BASE_URL` | `https://website.freefit.co.il` | site to read from |
 
@@ -152,8 +188,10 @@ Set these as environment variables, e.g. `PORT=8080 npm start`.
 npm test
 ```
 
-17 tests run against a local mock of the Freefit site. They cover all three data
-sources, page parsing, the filters and the API. To try the UI without touching the
+32 tests run against a local mock of the Freefit site and mock business websites.
+They cover all three data sources, page parsing, contact extraction (WhatsApp evidence,
+negated labels, plain phones, Freefit's own contacts, robots.txt, dead sites, the site
+cache), the geocoder fallback, the filters, cluster clicks, safe links and the API. To try the UI without touching the
 real site:
 
 ```
@@ -174,5 +212,7 @@ FREEFIT_BASE_URL=<that url> GEOCODE_URL=<that url>/geocode GEOCODE_INTERVAL_MS=5
 ## Notes
 
 - Built for personal use. It reads public pages at a gentle pace; please keep it that way.
-- Map tiles © OpenStreetMap contributors, © CARTO. Address lookup by OpenStreetMap Nominatim.
+- Map tiles © OpenStreetMap contributors, from tile.openstreetmap.org, with the OSM
+  Humanitarian (HOT / OSM France) tile server as automatic fallback. No API key.
+- Address lookup by OpenStreetMap Nominatim, with Photon (komoot) as fallback.
 - Not affiliated with Freefit.

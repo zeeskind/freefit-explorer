@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { config } from '../server/config.js';
-import { GROUPS, OTHER_GROUP, PLAN_ORDER } from '../server/normalize.js';
+import { GROUPS, OTHER_GROUP, PLAN_ORDER, toListItem, DETAIL_FIELDS } from '../server/normalize.js';
 
 const require = createRequire(import.meta.url);
 const pkgDir = (name) => path.dirname(require.resolve(`${name}/package.json`));
@@ -38,9 +38,9 @@ const list = {
   source: dataset?.source ?? null,
   groups: [...GROUPS.map(({ kw, ...g }) => g), OTHER_GROUP],
   plans: PLAN_ORDER,
-  items: items.map(({ notes, description, hours, ...light }) => light),
+  items: items.map(toListItem),
 };
-const details = Object.fromEntries(items.map((i) => [i.id, { hours: i.hours, notes: i.notes, description: i.description }]));
+const details = Object.fromEntries(items.map((i) => [i.id, Object.fromEntries(DETAIL_FIELDS.map((f) => [f, i[f]]))]));
 await fs.writeFile(path.join(dist, 'data/list.json'), JSON.stringify(list));
 await fs.writeFile(path.join(dist, 'data/details.json'), JSON.stringify(details));
 
