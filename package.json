@@ -1,0 +1,24 @@
+{
+  "name": "freefit-explorer",
+  "version": "1.0.0",
+  "description": "A fast, map-first replacement for the Freefit locations page (personal use).",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "probe": "node scripts/probe.js",
+    "refresh": "node scripts/refresh.js",
+    "test": "node --test test/*.test.js",
+    "build:site": "node scripts/build-site.js"
+  },
+  "dependencies": {
+    "cheerio": "1.0.0",
+    "compression": "1.7.5",
+    "express": "4.21.2",
+    "leaflet": "1.9.4",
+    "leaflet.markercluster": "1.5.3"
+  }
+}

@@ -1,0 +1,331 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { request } from './http.js';
+import { loadFromWpRest } from './sources/wpRest.js';
+import { parseLocationsFilters, discoverClubUrls, crawlMemberships, scrapeClubPages, wpSlugify } from './sources/html.js';
+import { finalizeRecord, mergeRecords, slugFromUrl, safeDecode, GROUPS, OTHER_GROUP, PLAN_ORDER } from './normalize.js';
+import { Geocoder, addressQueries } from './geocode.js';
+
+const log = (...a) => console.log(`[${new Date().toISOString().slice(11, 19)}]`, ...a);
+
+export class DataService {
+  constructor(cfg) {
+    this.cfg = cfg;
+    this.file = path.join(cfg.dataDir, 'locations.json');
+    this.dataset = null;
+    this.building = null;
+    this.geocoding = null;
+    this.abortGeocode = false;
+    this.status = { state: 'idle', phase: null, done: 0, total: 0, error: null, log: [] };
+    this.geocoder = new Geocoder({ ...cfg.geocode, cacheFile: path.join(cfg.dataDir, 'geocode-cache.json') });
+  }
+
+  /* ----------------------------- lifecycle ----------------------------- */
+
+  async init() {
+    await fs.mkdir(this.cfg.dataDir, { recursive: true });
+    await this.geocoder.load();
+    try {
+      this.dataset = JSON.parse(await fs.readFile(this.file, 'utf8'));
+      log(`Loaded ${this.dataset.items.length} locations from cache (${this.dataset.generatedAt})`);
+    } catch {
+      log('No cached dataset yet');
+    }
+    const ageH = this.dataset ? (Date.now() - Date.parse(this.dataset.generatedAt)) / 36e5 : Infinity;
+    if (!this.dataset || ageH > this.cfg.cacheTtlHours) this.refresh();
+    else this.startGeocoding();
+  }
+
+  refresh() {
+    if (this.building) return this.building;
+    this.abortGeocode = true;
+    this.building = this.#build()
+      .catch((e) => {
+        log('Build failed:', e);
+        this.setStatus({ state: 'error', error: e.message });
+      })
+      .finally(() => {
+        this.building = null;
+      });
+    return this.building;
+  }
+
+  setStatus(patch) {
+    this.status = { ...this.status, ...patch };
+  }
+
+  note(msg) {
+    log(msg);
+    this.status.log = [...this.status.log.slice(-40), msg];
+  }
+
+  progress = ({ phase, done, total }) => this.setStatus({ phase, done, total });
+
+  publicStatus() {
+    const d = this.dataset;
+    return {
+      state: this.status.state,
+      phase: this.status.phase,
+      done: this.status.done,
+      total: this.status.total,
+      error: this.status.error,
+      log: this.status.log.slice(-8),
+      version: d?.version ?? null,
+      generatedAt: d?.generatedAt ?? null,
+      source: d?.source ?? null,
+      count: d?.items.length ?? 0,
+      located: d ? d.items.filter((i) => i.lat != null).length : 0,
+      approximate: d ? d.items.filter((i) => i.geo === 'city').length : 0,
+    };
+  }
+
+  /* ------------------------------- build ------------------------------- */
+
+  async #build() {
+    const { baseUrl, sourceMode } = this.cfg;
+    this.setStatus({ state: 'building', phase: 'Reading the locations page', done: 0, total: 0, error: null, log: [] });
+    this.note(`Building dataset from ${baseUrl} (mode: ${sourceMode})`);
+
+    // Filter lists: canonical city / type / style / plan names.
+    let filters = { city: [], types: [], styles: [], plans: [] };
+    try {
+      const { text } = await request(`${baseUrl}/locations/`);
+      filters = parseLocationsFilters(text);
+      this.note(`Filters: ${filters.city.length} cities, ${filters.types.length} types, ${filters.styles.length} styles, ${filters.plans.length} plans`);
+    } catch (e) {
+      this.note(`Could not read /locations/ (${e.message})`);
+    }
+    const knownCities = filters.city.map((o) => o.label);
+    const termNames = {};
+    for (const [role, tax] of [['types', 'club-type'], ['styles', 'club-activity']]) {
+      for (const o of filters[role]) {
+        for (const key of [safeDecode(o.value), wpSlugify(o.label)]) {
+          termNames[`${tax}:${key}`] = o.label;
+          termNames[key] = termNames[key] || o.label;
+        }
+      }
+    }
+
+    let records = [];
+    let source = null;
+    const want = (m) => sourceMode === 'auto' || sourceMode === m;
+
+    // 1) WordPress REST API
+    if (want('rest')) {
+      try {
+        this.setStatus({ phase: 'Trying the WordPress API' });
+        const res = await loadFromWpRest(baseUrl, { log: (m) => this.note(m), onProgress: this.progress });
+        if (res.records.length) {
+          records = res.records;
+          source = 'wp-rest';
+        }
+      } catch (e) {
+        this.note(`REST unavailable: ${e.message}`);
+      }
+    }
+
+    // 2) Sitemaps → club URLs
+    if (!records.length && want('sitemap')) {
+      this.setStatus({ phase: 'Reading sitemaps' });
+      const urls = await discoverClubUrls(baseUrl, { log: (m) => this.note(m) });
+      if (urls.length) {
+        records = urls.map((url) => ({ url, slug: slugFromUrl(url) }));
+        source = 'sitemap+html';
+      }
+    }
+
+    // 3) Taxonomy archives → club URLs + type membership
+    if (!records.length && want('archive') && filters.types.length) {
+      this.setStatus({ phase: 'Crawling category pages' });
+      const membership = await crawlMemberships(baseUrl, 'club-type', filters.types, {
+        concurrency: this.cfg.scrapeConcurrency,
+        onProgress: this.progress,
+      });
+      records = [...membership].map(([url, types]) => ({ url, slug: slugFromUrl(url), types }));
+      if (records.length) source = 'archive+html';
+      this.note(`Archives: ${records.length} clubs`);
+    }
+
+    if (!records.length) throw new Error('No data source worked. Run "npm run probe" to see what the site returned.');
+    this.note(`Source: ${source}, ${records.length} clubs`);
+
+    // Publish what we have so the UI is usable while pages are being read.
+    this.#publish(records, source, knownCities);
+
+    // Enrich from club pages where key details are missing.
+    const needDetails = records.filter((r) => r.url && (!r.address || !r.plans?.length || !r.hours?.length || (!r.types?.length && !r.styles?.length)));
+    if (needDetails.length) {
+      this.note(`Reading ${needDetails.length} club pages for details`);
+      const pages = await scrapeClubPages(
+        needDetails.map((r) => r.url),
+        { concurrency: this.cfg.scrapeConcurrency, delayMs: this.cfg.requestDelayMs, termNames, onProgress: this.progress, log: (m) => this.note(m) }
+      );
+      const byUrl = new Map(pages.map((p) => [p.url, p]));
+      records = records.map((r) => {
+        const p = byUrl.get(r.url);
+        if (!p) return r;
+        // Prefer REST ids; the page gives everything else.
+        const { id, ...rest } = p;
+        return mergeRecords({ ...r, id: r.id ?? id }, rest);
+      });
+    }
+
+    // Fill in categories from taxonomy archives when neither REST nor pages exposed them.
+    for (const [field, tax, opts] of [['types', 'club-type', filters.types], ['styles', 'club-activity', filters.styles]]) {
+      const covered = records.filter((r) => r[field]?.length).length;
+      if (!opts.length || covered / records.length >= 0.5) continue;
+      this.note(`Only ${covered}/${records.length} clubs have ${field}; reading ${tax} archives`);
+      const membership = await crawlMemberships(baseUrl, tax, opts, { concurrency: this.cfg.scrapeConcurrency, onProgress: this.progress });
+      records = records.map((r) => (membership.has(r.url) ? mergeRecords(r, { [field]: membership.get(r.url) }) : r));
+    }
+
+    this.#publish(records, source, knownCities);
+    this.setStatus({ state: 'idle', phase: null, done: 0, total: 0 });
+    this.note(`Done: ${this.dataset.items.length} locations`);
+    this.startGeocoding();
+  }
+
+  #publish(records, source, knownCities) {
+    const prev = new Map((this.dataset?.items || []).map((i) => [i.id, i]));
+    const seen = new Set();
+    const items = [];
+    for (const r of records) {
+      const item = finalizeRecord(r, knownCities);
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      // Keep coordinates we already geocoded for an unchanged address.
+      const old = prev.get(item.id);
+      if (item.lat == null && old?.lat != null && old.address === item.address) {
+        Object.assign(item, { lat: old.lat, lng: old.lng, geo: old.geo });
+      }
+      items.push(item);
+    }
+    items.sort((a, b) => a.name.localeCompare(b.name, 'he'));
+    this.dataset = {
+      version: Date.now(),
+      generatedAt: new Date().toISOString(),
+      source,
+      knownCities,
+      items,
+    };
+    this.#save();
+  }
+
+  async #save() {
+    if (this.saving) {
+      this.saveAgain = true;
+      return;
+    }
+    this.saving = true;
+    try {
+      const tmp = `${this.file}.tmp`;
+      await fs.writeFile(tmp, JSON.stringify(this.dataset));
+      await fs.rename(tmp, this.file);
+    } catch (e) {
+      log('Save failed:', e.message);
+    } finally {
+      this.saving = false;
+      if (this.saveAgain) {
+        this.saveAgain = false;
+        this.#save();
+      }
+    }
+  }
+
+  #touch() {
+    this.dataset = { ...this.dataset, version: Date.now() };
+    this.#save();
+  }
+
+  /* ----------------------------- geocoding ----------------------------- */
+
+  startGeocoding() {
+    if (this.geocoding || !this.dataset) return;
+    this.abortGeocode = false;
+    this.geocoding = this.#geocodeAll()
+      .catch((e) => log('Geocoding stopped:', e.message))
+      .finally(async () => {
+        await this.geocoder.save();
+        this.geocoding = null;
+        if (this.status.state === 'geocoding') this.setStatus({ state: 'idle', phase: null, done: 0, total: 0 });
+      });
+  }
+
+  async #geocodeAll() {
+    const items = () => this.dataset.items;
+
+    // Pass 1: one lookup per city so every location gets an approximate pin fast.
+    const cities = [...new Set(items().filter((i) => i.lat == null && i.city).map((i) => i.city))];
+    const cityCoords = new Map();
+    let n = 0;
+    for (const city of cities) {
+      if (this.abortGeocode) return;
+      this.setStatus({ state: 'geocoding', phase: 'Placing cities on the map', done: n++, total: cities.length });
+      const c = await this.geocoder.lookup(`${city}, ישראל`);
+      if (c) cityCoords.set(city, c);
+    }
+    let changed = 0;
+    for (const i of items()) {
+      const c = i.lat == null && cityCoords.get(i.city);
+      if (c) {
+        Object.assign(i, { lat: c.lat, lng: c.lng, geo: 'city' });
+        changed++;
+      }
+    }
+    if (changed) this.#touch();
+
+    // Pass 2: exact addresses (cache hits first, so a restart catches up instantly).
+    const todo = items()
+      .filter((i) => i.address && i.geo !== 'site' && i.geo !== 'exact')
+      .sort((a, b) => Number(this.geocoder.has(addressQueries(b.address, b.city)[0] || '')) - Number(this.geocoder.has(addressQueries(a.address, a.city)[0] || '')));
+    n = 0;
+    changed = 0;
+    for (const item of todo) {
+      if (this.abortGeocode) return;
+      this.setStatus({ state: 'geocoding', phase: 'Pinpointing addresses', done: n++, total: todo.length });
+      for (const q of addressQueries(item.address, item.city)) {
+        const c = await this.geocoder.lookup(q);
+        if (!c) continue;
+        // Sanity check: an exact pin should sit near its city.
+        const city = cityCoords.get(item.city) || (item.geo === 'city' ? { lat: item.lat, lng: item.lng } : null);
+        if (city && distanceKm(city, c) > 35) continue;
+        Object.assign(item, { lat: c.lat, lng: c.lng, geo: 'exact' });
+        changed++;
+        break;
+      }
+      if (changed >= 25) {
+        this.#touch();
+        changed = 0;
+      }
+    }
+    if (changed) this.#touch();
+    this.note('Geocoding finished');
+  }
+
+  /* ------------------------------- reads ------------------------------- */
+
+  list() {
+    if (!this.dataset) return null;
+    const { version, generatedAt, source, items } = this.dataset;
+    return {
+      version,
+      generatedAt,
+      source,
+      groups: [...GROUPS.map(({ kw, ...g }) => g), OTHER_GROUP],
+      plans: PLAN_ORDER,
+      items: items.map(({ notes, description, hours, ...light }) => light),
+    };
+  }
+
+  get(id) {
+    return this.dataset?.items.find((i) => i.id === String(id)) || null;
+  }
+}
+
+export function distanceKm(a, b) {
+  const R = 6371;
+  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
+  const dLng = ((b.lng - a.lng) * Math.PI) / 180;
+  const s = Math.sin(dLat / 2) ** 2 + Math.cos((a.lat * Math.PI) / 180) * Math.cos((b.lat * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}

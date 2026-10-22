@@ -1,0 +1,13 @@
+# Netlify serves the static build. Data is collected separately (npm run refresh or the
+# GitHub Action in .github/workflows) and committed to data/.
+[build]
+  command = "npm run build:site"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+[[headers]]
+  for = "/data/*"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"

@@ -1,0 +1,8 @@
+services:
+  freefit-explorer:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data   # keeps the location cache between restarts
+    restart: unless-stopped

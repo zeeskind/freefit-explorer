@@ -1,0 +1,46 @@
+# Collects fresh Freefit data every night and commits it. Netlify redeploys on each push.
+name: Update Freefit data
+
+on:
+  workflow_dispatch:        # "Run workflow" button in the Actions tab
+  schedule:
+    - cron: '0 2 * * *'     # every day at 02:00 UTC
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-data
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Collect locations and look up addresses
+        run: npm run refresh
+        env:
+          OPEN_BROWSER: '0'
+          GEOCODE_USER_AGENT: 'FreefitExplorer/1.0 (personal use; github.com/${{ github.repository }})'
+
+      - name: Commit updated data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git add data/locations.json data/geocode-cache.json
+          if git diff --staged --quiet; then
+            echo "No changes"
+          else
+            git commit -m "Update Freefit data"
+            git push
+          fi

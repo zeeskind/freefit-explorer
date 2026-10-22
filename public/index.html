@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0F3D5E" />
+  <title>איפה מתאמנים – Freefit Explorer</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230F3D5E'/><path d='M6 11h20M6 16h20M6 21h20' stroke='%23F2B705' stroke-width='2.4' stroke-dasharray='3 2.4'/></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Hebrew:wght@400;500;600&family=Secular+One&display=swap" />
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css" />
+  <link rel="stylesheet" href="/vendor/markercluster/MarkerCluster.css" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app" id="app">
+    <aside class="panel" id="panel" aria-label="חיפוש וסינון מקומות">
+      <div class="sheet-handle" id="sheetHandle" aria-hidden="true"><span></span></div>
+
+      <header class="brand">
+        <h1>איפה מתאמנים</h1>
+        <p class="brand-sub" id="totalLine">טוען מקומות…</p>
+      </header>
+      <div class="lane-rope" aria-hidden="true"></div>
+
+      <div class="search-row">
+        <label class="search">
+          <span class="sr-only">חיפוש לפי שם, כתובת או סוג אימון</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></svg>
+          <input id="q" type="search" autocomplete="off" placeholder="שם, כתובת או סוג אימון" />
+        </label>
+        <button class="btn-ghost filters-toggle" id="filtersToggle" aria-expanded="false" aria-controls="filters">
+          סינון <span class="badge" id="filterBadge" hidden></span>
+        </button>
+      </div>
+
+      <div class="active-chips" id="activeChips" aria-live="polite"></div>
+
+      <section class="filters" id="filters">
+        <fieldset class="f-block">
+          <legend>המסלול שלי</legend>
+          <div class="segmented" id="planSeg" role="radiogroup"></div>
+        </fieldset>
+
+        <fieldset class="f-block">
+          <legend>סוג מקום</legend>
+          <div class="chips" id="groupChips"></div>
+        </fieldset>
+
+        <div class="f-block disc" data-facet="cities">
+          <button type="button" class="disc-btn" aria-expanded="false" aria-controls="cityCombo">
+            <span class="legend">עיר</span><span class="disc-sum" data-sum="cities">הכל</span><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <div class="combo" id="cityCombo" hidden></div>
+        </div>
+        <div class="f-block disc" data-facet="types">
+          <button type="button" class="disc-btn" aria-expanded="false" aria-controls="typeCombo">
+            <span class="legend">פעילות</span><span class="disc-sum" data-sum="types">הכל</span><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <div class="combo" id="typeCombo" hidden></div>
+        </div>
+        <div class="f-block disc" data-facet="styles">
+          <button type="button" class="disc-btn" aria-expanded="false" aria-controls="styleCombo">
+            <span class="legend">סגנון אימון</span><span class="disc-sum" data-sum="styles">הכל</span><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <div class="combo" id="styleCombo" hidden></div>
+        </div>
+        <div class="f-block disc" data-facet="amenities">
+          <button type="button" class="disc-btn" aria-expanded="false" aria-controls="amenityChips">
+            <span class="legend">מתקנים</span><span class="disc-sum" data-sum="amenities">הכל</span><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <div class="chips" id="amenityChips" hidden></div>
+        </div>
+
+        <button class="btn-ghost reset" id="resetBtn">ניקוי כל הסינונים</button>
+      </section>
+
+      <div class="list-bar">
+        <p class="list-count" id="listCount" aria-live="polite"></p>
+        <label class="switch">
+          <input type="checkbox" id="limitToMap" checked />
+          <span>רק באזור המפה</span>
+        </label>
+      </div>
+
+      <ol class="results" id="results" aria-label="תוצאות"></ol>
+
+      <footer class="status" id="status">
+        <span id="statusText"></span>
+        <button class="link-btn" id="refreshBtn">רענון נתונים</button>
+      </footer>
+    </aside>
+
+    <main class="map-wrap">
+      <div id="map" aria-label="מפת מקומות"></div>
+      <div class="map-tools">
+        <button class="tool" id="locateBtn" title="הצג מקומות קרובים אליי" aria-label="הצג מקומות קרובים אליי">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+        </button>
+        <button class="tool" id="fitBtn" title="הצג את כל התוצאות" aria-label="הצג את כל התוצאות">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+        </button>
+      </div>
+      <div class="map-progress" id="mapProgress" hidden></div>
+    </main>
+
+    <article class="detail" id="detail" hidden aria-live="polite"></article>
+  </div>
+
+  <div class="boot" id="boot" hidden>
+    <div class="boot-card">
+      <h2>אוספים את כל המקומות</h2>
+      <p id="bootPhase">מתחברים לאתר של Freefit…</p>
+      <div class="bar"><span id="bootBar"></span></div>
+      <p class="boot-note">בהפעלה הראשונה זה לוקח כמה דקות. בפעם הבאה הכול נטען מיד מהמטמון.</p>
+      <pre id="bootLog"></pre>
+    </div>
+  </div>
+
+  <script src="/vendor/leaflet/leaflet.js"></script>
+  <script src="/vendor/markercluster/leaflet.markercluster.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
