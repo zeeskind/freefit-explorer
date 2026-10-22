@@ -218,6 +218,7 @@ export class DataService {
     }
     this.saving = true;
     try {
+      await fs.mkdir(path.dirname(this.file), { recursive: true });
       const tmp = `${this.file}.tmp`;
       await fs.writeFile(tmp, JSON.stringify(this.dataset));
       await fs.rename(tmp, this.file);

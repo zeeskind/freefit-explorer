@@ -15,17 +15,21 @@ concurrency:
 
 jobs:
   update:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 300
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
 
       - run: npm ci --no-audit --no-fund
+
+      - name: Check what the Freefit site exposes
+        run: npm run probe
+        continue-on-error: true
 
       - name: Collect locations and look up addresses
         run: npm run refresh
@@ -33,11 +37,17 @@ jobs:
           OPEN_BROWSER: '0'
           GEOCODE_USER_AGENT: 'FreefitExplorer/1.0 (personal use; github.com/${{ github.repository }})'
 
+      - name: Summary
+        run: |
+          ls -la data/
+          node -e "const d=require('./data/locations.json');const i=d.items;console.log('source:',d.source,'| total:',i.length,'| on map:',i.filter(x=>x.lat!=null).length,'| exact:',i.filter(x=>x.geo==='exact'||x.geo==='site').length,'| city-level:',i.filter(x=>x.geo==='city').length)"
+
       - name: Commit updated data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
-          git add data/locations.json data/geocode-cache.json
+          git add -A data/
+          git reset -q data/probe-report.json 2>/dev/null || true
           if git diff --staged --quiet; then
             echo "No changes"
           else
