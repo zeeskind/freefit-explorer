@@ -585,7 +585,7 @@ function renderContactSection(it, loading) {
     : '';
   const body = rows || social.length
     ? `${rows ? `<ul class="c-list">${rows}</ul>` : ''}${waNote}${socialHtml}`
-    : '<p class="muted">לא נמצאו פרטי קשר ציבוריים בדף העסק או באתר שלו.</p>';
+    : `<p class="muted">לא נמצאו פרטי קשר. Freefit לא מפרסם טלפונים של העסקים${it.osm ? ', וגם ברשומה של העסק ב-OpenStreetMap אין פרטי קשר' : ', והעסק לא נמצא ב-OpenStreetMap'}.</p>`;
   return `<section class="d-sec"><h3>יצירת קשר</h3>${body}</section>`;
 }
 
@@ -617,6 +617,8 @@ function renderSourcesSection(it) {
   const freefit = safeUrl(it.url);
   const parts = [];
   if (freefit) parts.push(`<li><a href="${esc(freefit)}" target="_blank" rel="noopener">הדף של העסק ב-Freefit</a>${copyBtn(freefit, 'הקישור לדף ב-Freefit')}</li>`);
+  const osmUrl = safeUrl(it.osm?.url);
+  if (osmUrl) parts.push(`<li><a href="${esc(osmUrl)}" target="_blank" rel="noopener">הרשומה ב-OpenStreetMap${it.osm.name ? `: ${esc(it.osm.name)}` : ''}</a></li>`);
   const st = it.siteStatus;
   if (st?.ok && safeUrl(st.finalUrl || st.url)) parts.push(`<li>אתר העסק נבדק לאיתור פרטי קשר</li>`);
   parts.push(`<li>קישור למקום הזה באפליקציה${copyBtn(placeLink(it), 'הקישור למקום')}</li>`);

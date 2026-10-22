@@ -23,7 +23,14 @@ const STYLES = ['פילאטיס מכשירים', 'TRX', 'ספינינג', 'יו�
 const PLANS = ['SMART', 'PLUS', 'PRO', 'MAX'];
 const STREETS = ['הרצל', 'ויצמן', 'בן גוריון', 'סמטת הר גילה', 'ז׳בוטינסקי', 'אחד העם', 'הנביאים'];
 
-export function makeClubs(n = 40) {
+const BRANDS = ['Lotusfit', 'Omadax', 'Purely', 'Greenboxa', 'Siriflex', 'Atlasgym', 'Novacore', 'Zenhaus'];
+export const brandOf = (i) => `${BRANDS[i % BRANDS.length]}${i}`;
+
+/**
+ * opts.bare  → pages without any contact details (like the real Freefit pages)
+ * opts.brand → realistic names: "<Brand> פילאטיס מכשירים <city>"
+ */
+export function makeClubs(n = 40, opts = {}) {
   const cityNames = Object.keys(CITIES);
   return Array.from({ length: n }, (_, i) => {
     const city = cityNames[i % cityNames.length];
@@ -35,7 +42,8 @@ export function makeClubs(n = 40) {
       id: 29000 + i,
       // A few Hebrew slugs, as on the real site (/club/אומדה/).
       slug: i === 0 ? 'אומדה' : `club-${i}`,
-      name: i === 0 ? 'אומדה' : `מועדון בדיקה ${i}`,
+      name: opts.brand ? `${brandOf(i)} פילאטיס מכשירים ${city}` : i === 0 ? 'אומדה' : `מועדון בדיקה ${i}`,
+      bare: !!opts.bare,
       city,
       address: `${STREETS[i % STREETS.length]} ${i + 3}, ${city}`,
       types,
@@ -71,6 +79,7 @@ export function expectedContacts(c) {
 }
 
 function contactHtml(c, base) {
+  if (c.bare) return '';
   const i = c.id - 29000;
   const site = base.replace('127.0.0.1', 'localhost'); // a different host = "external" site
   switch (i % 7) {
@@ -102,6 +111,36 @@ function bizContact(i) {
   return `<!doctype html><html><body><main><h1>צור קשר</h1>
 <p>מייל: <a href="mailto:info${i}@biz.co.il">info${i}@biz.co.il</a></p>
 <p>WhatsApp 053-${pad(i, 7)}</p></main></body></html>`;
+}
+
+
+/**
+ * Mock OpenStreetMap venues for the clubs (used with makeClubs({ bare: true, brand: true })).
+ * i % 4 == 0 → exact pin from the page; venue 55 m away, same brand, phone + WhatsApp tag + website
+ * i % 4 == 1 → city-level pin; venue 2 km from the centre, same brand, phone      → match, pin moves
+ * i % 4 == 2 → city-level pin; only a different business nearby                    → no match
+ * i % 4 == 3 → city-level pin; two venues with the same brand in town (ambiguous)  → no match
+ */
+export function osmVenues(clubs, base) {
+  const site = base.replace('127.0.0.1', 'localhost');
+  const out = [];
+  let id = 900000;
+  for (const c of clubs) {
+    const i = c.id - 29000;
+    const [clat, clng] = CITIES[c.city];
+    const brand = brandOf(i);
+    if (i % 4 === 0 && c.coords) {
+      out.push({ type: 'node', id: id++, lat: c.coords[0] + 0.0005, lon: c.coords[1], tags: { name: brand, leisure: 'fitness_centre', phone: `+972 3 ${pad(i, 7)}`, 'contact:whatsapp': `+972 54 ${pad(i, 7)}`, website: `${site}/biz/${i}/`, 'contact:instagram': `${brand.toLowerCase()}` } });
+    } else if (i % 4 === 1) {
+      out.push({ type: 'way', id: id++, center: { lat: clat + 0.018, lon: clng }, tags: { name: `${brand} Studio`, sport: 'pilates', 'contact:phone': `08-${pad(i, 7)}` } });
+    } else if (i % 4 === 2) {
+      out.push({ type: 'node', id: id++, lat: clat + 0.009, lon: clng, tags: { name: `Other${i} Gym`, leisure: 'fitness_centre', phone: `02-${pad(i, 7)}` } });
+    } else if (i % 4 === 3) {
+      out.push({ type: 'node', id: id++, lat: clat + 0.009, lon: clng, tags: { name: brand, leisure: 'fitness_centre', phone: `04-${pad(i, 7)}` } });
+      out.push({ type: 'node', id: id++, lat: clat - 0.027, lon: clng, tags: { name: brand, leisure: 'fitness_centre', phone: `09-${pad(i, 7)}` } });
+    }
+  }
+  return out;
 }
 
 function clubPage(c, base) {
@@ -190,6 +229,18 @@ export function startMock({ mode = 'rest', clubs = makeClubs(), perPage = 15 } =
     let bm = path.match(/^\/biz\/(\d+)\/(contact\/)?$/);
     if (bm) return send(200, bm[2] ? bizContact(Number(bm[1])) : bizHome(Number(bm[1])));
     if (/^\/(blocked|gone)\//.test(path)) return send(path.startsWith('/blocked') ? 200 : 404, '<html><body><a href="tel:0501112222">x</a></body></html>');
+
+    // Overpass API (POST)
+    if (path === '/overpass') return send(200, { elements: osmVenues(clubs, base) }, 'application/json');
+    if (path === '/overpass-down') return send(504, 'Gateway Timeout', 'text/plain');
+
+    // Geocoder that only knows cities (addresses with house numbers are "not found")
+    if (path === '/geocode-cityonly') {
+      const q = u.searchParams.get('q') || '';
+      const city = Object.keys(CITIES).find((c) => q.includes(c));
+      if (!city || /\d/.test(q)) return send(200, [], 'application/json');
+      return send(200, [{ lat: String(CITIES[city][0]), lon: String(CITIES[city][1]) }], 'application/json');
+    }
 
     // Geocoder that refuses every request (like Nominatim blocking a cloud IP)
     if (path === '/geocode-blocked') return send(429, 'Too Many Requests', 'text/plain');

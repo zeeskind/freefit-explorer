@@ -56,13 +56,34 @@ The static site has no "רענון נתונים" button; data updates come from 
 
 ## Contact details
 
-For every business, the app reads its public Freefit page and, when that page links to
-the business's own website, that site's home page plus one contact page. It collects
-phone numbers, WhatsApp numbers, emails, the website, booking pages and social profiles.
+**Where they come from.** Freefit's business pages publish no phones, WhatsApp or
+websites (Freefit keeps everyone inside its app), so the app gathers them from:
 
-- **WhatsApp is shown only when the business itself published it as WhatsApp:** a
-  WhatsApp link (`wa.me`, `api.whatsapp.com`), or a number written next to the word
-  וואטסאפ / WhatsApp. Each WhatsApp button says which of the two it was and where.
+1. **OpenStreetMap** (free, no key): one Overpass query returns every named gym, studio
+   and pool in Israel with its phone, website and `contact:whatsapp` tags. Each Freefit
+   business is matched by a distinctive shared name word *and* distance (300 m for exact
+   pins, a stricter rule for city-level pins); unclear matches are skipped, and every
+   match links to its OpenStreetMap record so you can check it.
+2. **The business's own website**, whenever any source gives one: home page + contact
+   page, including WhatsApp headings ("הודעות וואטצאפ" with numbers below), floating
+   WhatsApp buttons and star numbers (*6669). Chains listing several branches: each
+   business keeps only the numbers for its own city.
+3. **`data/overrides.json`**, for anything the automatic sources miss. Add a business's
+   website (its contacts are then extracted automatically) or its WhatsApp/phone directly:
+   ```json
+   { "ספורטן פתח": { "website": "https://www.sportan.org.il/", "whatsapp": "052-6996306" } }
+   ```
+   Keys: the Freefit page URL, or the name or a part of it that matches one business.
+   The run log reports any key that matched nothing or more than one business.
+
+Automatic web search is not included: Google closed its search API to new users (it shuts
+down on January 1, 2027), and every remaining full-web search API needs a key and is
+mostly paid. Scraping search-engine result pages breaks their terms.
+
+- **WhatsApp is shown only when a source explicitly marks the number as WhatsApp:** a
+  WhatsApp link (`wa.me`, `api.whatsapp.com`), a number written under or next to the word
+  וואטסאפ / WhatsApp, an OpenStreetMap `contact:whatsapp` tag, or your own overrides file.
+  Each WhatsApp button says which it was and where.
 - **A plain phone number never becomes a WhatsApp button.** WhatsApp has no public way
   to check whether a number has an account; the only way is to automate a logged-in
   WhatsApp account, which breaks WhatsApp's terms. So the app relies on what the
@@ -139,6 +160,8 @@ server/
   sources/wpRest.js WordPress REST source
   sources/html.js   sitemap, category pages, club page and filter-list parsing
   sources/sites.js  business websites: robots.txt, home + contact page, cache
+  sources/osm.js    OpenStreetMap venues: download, name + distance matching, tags
+  overrides.js      data/overrides.json: manual websites and numbers
   contacts.js       phones, WhatsApp evidence, emails, links, site-wide filtering
   normalize.js      common data shape, colour groups, amenities, cities
   geocode.js        Nominatim + Photon address lookup with disk cache
@@ -179,6 +202,9 @@ Set these as environment variables, e.g. `PORT=8080 npm start`.
 | `CRAWL_SITES` | on | set to `off` to skip visiting business websites |
 | `SITE_CONCURRENCY` | `6` | parallel requests to business websites |
 | `SITE_CACHE_DAYS` | `14` | how long website results are reused |
+| `OSM` | on | set to `off` to skip OpenStreetMap contacts |
+| `OVERPASS_URL` | overpass-api.de, overpass.kumi.systems | Overpass endpoints, comma-separated |
+| `OSM_CACHE_DAYS` | `7` | how long the venue list is reused |
 | `DATA_DIR` | `./data` | where the cache lives |
 | `FREEFIT_BASE_URL` | `https://website.freefit.co.il` | site to read from |
 
@@ -188,10 +214,11 @@ Set these as environment variables, e.g. `PORT=8080 npm start`.
 npm test
 ```
 
-32 tests run against a local mock of the Freefit site and mock business websites.
+42 tests run against a local mock of the Freefit site and mock business websites.
 They cover all three data sources, page parsing, contact extraction (WhatsApp evidence,
 negated labels, plain phones, Freefit's own contacts, robots.txt, dead sites, the site
-cache), the geocoder fallback, the filters, cluster clicks, safe links and the API. To try the UI without touching the
+cache), the real Sportan contact page text, OpenStreetMap matching with decoys and
+ambiguous twins, manual overrides, the geocoder fallback, the filters, cluster clicks, safe links and the API. To try the UI without touching the
 real site:
 
 ```

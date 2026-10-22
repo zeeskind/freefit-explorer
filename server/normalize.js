@@ -203,13 +203,14 @@ export function finalizeRecord(r, knownCities = []) {
     contact: r.contact || emptyContact(),
     contactKinds: contactKinds(r.contact),
     siteStatus: r.siteStatus || null,
+    osm: r.osm || null,
   };
 }
 
 /** Light version for the list endpoint (keeps payloads small). */
 export function toListItem(r) {
-  const { notes, description, hours, contact, siteStatus, ...rest } = r;
+  const { notes, description, hours, contact, siteStatus, osm, ...rest } = r;
   return rest;
 }
 
-export const DETAIL_FIELDS = ['notes', 'description', 'hours', 'contact', 'siteStatus'];
+export const DETAIL_FIELDS = ['notes', 'description', 'hours', 'contact', 'siteStatus', 'osm'];

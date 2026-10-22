@@ -41,11 +41,26 @@ export function normalizePhone(raw) {
   return { e164: `+972${d}`, display };
 }
 
+/** The text line around position i (used to tell which branch/city a number belongs to). */
+export function lineAt(text, i) {
+  const start = text.lastIndexOf('\n', i - 1) + 1;
+  const end = text.indexOf('\n', i);
+  return text.slice(start, end < 0 ? undefined : end).trim().slice(0, 160);
+}
+
 export function findPhones(text) {
+  const s = String(text || '');
   const out = [];
-  for (const m of String(text || '').matchAll(PHONE_RE)) {
+  for (const m of s.matchAll(PHONE_RE)) {
     const p = normalizePhone(m[0]);
-    if (p) out.push({ ...p, index: m.index, length: m[0].length });
+    if (p) out.push({ ...p, index: m.index, length: m[0].length, context: lineAt(s, m.index) });
+  }
+  // Israeli star numbers ("*6669"), only when the text says it is a number to call.
+  for (const m of s.matchAll(/(?<![\d*])\*\d{4}(?!\d)|(?<![\d*])\d{4}\*(?!\d)/g)) {
+    const around = s.slice(Math.max(0, m.index - 30), m.index + 12);
+    if (!/חייג|חיוג|טלפון|טל[׳']|מוקד|להזמנות|התקשרו|call|phone|tel/i.test(around)) continue;
+    const digits = m[0].replace('*', '');
+    out.push({ e164: `*${digits}`, display: `*${digits}`, index: m.index, length: m[0].length, context: lineAt(s, m.index) });
   }
   return out;
 }
@@ -75,7 +90,23 @@ export function findLabeledWhatsapp(text) {
       continue;
     }
     const prev = [...phones].reverse().find((p) => p.index + p.length <= m.index && m.index - (p.index + p.length) <= 6 && sameSentence(s.slice(p.index + p.length, m.index)));
-    if (prev) hits.set(prev.e164, prev);
+    if (prev) {
+      hits.set(prev.e164, prev);
+      continue;
+    }
+    // A heading such as "הודעות וואטצאפ" with the numbers listed on the next lines.
+    const line = lineAt(s, m.index);
+    const lineEnd = s.indexOf('\n', m.index);
+    if (line.length <= 40 && lineEnd > 0 && !findPhones(line).length) {
+      const following = s.slice(lineEnd + 1).split('\n').slice(0, 4);
+      let offset = lineEnd + 1;
+      for (const l of following) {
+        if (!l.trim()) break; // blank line ends the list
+        if (l.length > 100) break;
+        for (const p of phones) if (p.index >= offset && p.index < offset + l.length && p.e164.startsWith('+')) hits.set(p.e164, p);
+        offset += l.length + 1;
+      }
+    }
   }
   return [...hits.values()];
 }
@@ -170,6 +201,9 @@ function cleanSocial(u) {
   }
 }
 
+// Freefit's own published contact numbers (its support WhatsApp/phone); never a business's.
+export const FREEFIT_OWN_NUMBERS = new Set(['+972559458809']);
+
 export function emptyContact() {
   return { phones: [], whatsapp: [], emails: [], websites: [], social: {} };
 }
@@ -180,17 +214,19 @@ export function emptyContact() {
  */
 export function extractContacts({ links = [], text = '', source, sourceUrl, ownHosts = [] }) {
   const c = emptyContact();
+  const own = (p) => source === 'freefit' && FREEFIT_OWN_NUMBERS.has(p?.e164);
   const addPhone = (p) => {
-    if (p && !c.phones.some((x) => x.e164 === p.e164)) c.phones.push({ e164: p.e164, display: p.display, source, sourceUrl });
+    if (own(p)) return;
+    if (p && !c.phones.some((x) => x.e164 === p.e164)) c.phones.push({ e164: p.e164, display: p.display, source, sourceUrl, ...(p.context ? { context: p.context } : {}) });
   };
   const addWa = (p, evidence) => {
-    if (!p) return;
+    if (!p || own(p)) return;
     const existing = c.whatsapp.find((x) => x.e164 === p.e164);
     if (existing) {
       if (evidence === 'link') existing.evidence = 'link';
       return;
     }
-    c.whatsapp.push({ e164: p.e164, display: p.display, url: `https://wa.me/${p.e164.slice(1)}`, evidence, source, sourceUrl });
+    c.whatsapp.push({ e164: p.e164, display: p.display, url: `https://wa.me/${p.e164.slice(1)}`, evidence, source, sourceUrl, ...(p.context ? { context: p.context } : {}) });
   };
   const addEmail = (e) => {
     const email = e.toLowerCase().replace(/^mailto:/, '').split('?')[0].trim();
@@ -306,4 +342,20 @@ export function contactKinds(c) {
   if (primaryWebsite(c)) k.push('website');
   if (Object.keys(c.social || {}).length) k.push('social');
   return k;
+}
+
+/**
+ * A chain's site may list numbers for several branches. Drop numbers whose line names a
+ * different known city and not this business's city.
+ */
+export function keepOwnBranch(contact, city, knownCities = []) {
+  if (!contact || !city) return contact;
+  const norm = (x) => String(x).replace(/[-־–]/g, ' ').replace(/\s+/g, ' ').trim();
+  const own = norm(city);
+  const others = knownCities.map(norm).filter((c) => c && c !== own && c.length >= 3 && !own.includes(c) && !c.includes(own));
+  const foreign = (x) => {
+    const ctx = norm(x.context || '');
+    return ctx && !ctx.includes(own) && others.some((c) => ctx.includes(c));
+  };
+  return { ...contact, phones: contact.phones.filter((p) => !foreign(p)), whatsapp: contact.whatsapp.filter((w) => !foreign(w)) };
 }

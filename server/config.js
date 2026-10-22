@@ -45,6 +45,16 @@ export const config = {
   siteConcurrency: num(env.SITE_CONCURRENCY, 6),
   siteCacheDays: num(env.SITE_CACHE_DAYS, 14),
 
+  // Contacts from OpenStreetMap via Overpass (no key). OSM=off to skip.
+  osm: {
+    enabled: env.OSM !== 'off',
+    endpoints: (env.OVERPASS_URL || 'https://overpass-api.de/api/interpreter,https://overpass.kumi.systems/api/interpreter')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+    ttlDays: num(env.OSM_CACHE_DAYS, 7),
+  },
+
   openBrowser: env.OPEN_BROWSER ? env.OPEN_BROWSER !== '0' : !env.DOCKER,
 };
 

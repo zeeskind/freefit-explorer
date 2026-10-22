@@ -1,0 +1,8 @@
+{
+  "_help": "Add what automatic sources can't find. Key: the Freefit page URL, or the business name (or a unique part of it). Values: website, whatsapp, phone, email, instagram, facebook. Websites added here are visited and their contact details extracted.",
+  "ספורטן פתח": {
+    "website": "https://www.sportan.org.il/",
+    "whatsapp": "052-6996306",
+    "phone": "*6669"
+  }
+}

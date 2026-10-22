@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   normalizePhone, findPhones, findLabeledWhatsapp, parseWhatsappUrl, classifyUrl,
-  extractContacts, stripSiteWide, mergeContacts, primaryWebsite, contactKinds, emptyContact,
+  extractContacts, stripSiteWide, mergeContacts, primaryWebsite, contactKinds, emptyContact, keepOwnBranch,
 } from '../server/contacts.js';
 import { robotsDisallows, pageContent } from '../server/sources/sites.js';
 import { safeUrl, contactActions, websiteInfo, socialLinks, bookingInfo } from '../public/contacts.js';
@@ -160,4 +160,33 @@ test('cluster clicks list small or stacked clusters and zoom into spread ones', 
   assert.equal(clusterAction({ count: 60, zoom: 9, spanMeters: 20 }), 'list', 'pins stacked on one spot');
   assert.equal(clusterAction({ count: 60, zoom: 16, spanMeters: 900 }), 'list', 'already zoomed in');
   assert.equal(clusterAction({ count: 60, zoom: 10, spanMeters: 9000 }), 'zoom');
+});
+
+// The real text of sportan.org.il/contact2 (as shown in search results), October 2026.
+const SPORTAN = `צור קשר
+יום שישי 08:00-13:00
+ליצירת קשר: מועדוני ספורטן ניתן לחייג *6669
+הודעות וואטצאפ
+ספורטן פתח תקווה - לחץ כאן - 052-6996306
+ספורטן הוד השרון - לחץ כאן - 052-6996307
+
+דרושים/ות`;
+
+test('real Sportan contact page: WhatsApp heading, star number, branches', () => {
+  const c = extractContacts({ text: SPORTAN, source: 'site', sourceUrl: 'https://www.sportan.org.il/contact2' });
+  assert.deepEqual(nums(c.whatsapp), ['+972526996306', '+972526996307'], 'numbers under the WhatsApp heading');
+  assert.ok(c.whatsapp.every((w) => w.evidence === 'label'));
+  assert.ok(c.phones.some((p) => p.e164 === '*6669'), 'star number to call');
+  const pt = keepOwnBranch(c, 'פתח תקווה', ['פתח תקווה', 'הוד השרון', 'גני תקווה']);
+  assert.deepEqual(nums(pt.whatsapp), ['+972526996306'], 'Petah Tikva keeps only its own branch number');
+  assert.ok(pt.phones.some((p) => p.e164 === '*6669'), 'chain-wide number kept');
+  const hod = keepOwnBranch(c, 'הוד השרון', ['פתח תקווה', 'הוד השרון']);
+  assert.deepEqual(nums(hod.whatsapp), ['+972526996307']);
+  assert.equal(contactActions({ contact: pt }).find((a) => a.value === '*6669').href, 'tel:*6669');
+});
+
+test('a WhatsApp heading does not swallow numbers after a blank line or in long text', () => {
+  assert.deepEqual(findLabeledWhatsapp('וואטסאפ\n\nטלפון 03-5551234'), []);
+  assert.deepEqual(findLabeledWhatsapp('הצטרפו לקבוצת הוואטסאפ שלנו כדי לקבל עדכונים על שיעורים ואירועים מיוחדים במהלך השנה\n050-1234567'), [], 'not a heading');
+  assert.deepEqual(findPhones('מחיר *1234 מבצע').length, 0, 'star pattern without a call word');
 });

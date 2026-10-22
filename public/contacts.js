@@ -17,8 +17,10 @@ const EMAIL = /^[^@\s<>"']+@[^@\s<>"']+\.[a-z]{2,}$/i;
 export const EVIDENCE_TEXT = {
   link: 'העסק פרסם קישור וואטסאפ למספר הזה',
   label: 'העסק פרסם את המספר הזה כמספר וואטסאפ',
+  osm: 'המספר רשום כוואטסאפ של העסק ב-OpenStreetMap',
+  manual: 'הוזן ידנית כמספר הוואטסאפ של העסק',
 };
-export const SOURCE_TEXT = { freefit: 'דף העסק ב-Freefit', site: 'אתר העסק' };
+export const SOURCE_TEXT = { freefit: 'דף העסק ב-Freefit', site: 'אתר העסק', osm: 'OpenStreetMap', manual: 'קובץ ההוספות הידניות' };
 
 /**
  * Contact actions, WhatsApp first. WhatsApp entries exist only where the business
@@ -41,8 +43,8 @@ export function contactActions(item) {
     });
   }
   for (const p of c.phones || []) {
-    if (!E164.test(p.e164)) continue;
-    out.push({ kind: 'phone', href: `tel:${p.e164}`, label: 'חיוג', value: p.display, copy: p.display, source: SOURCE_TEXT[p.source] || '', sourceUrl: safeUrl(p.sourceUrl) });
+    if (!E164.test(p.e164) && !/^\*\d{4}$/.test(p.e164)) continue;
+    out.push({ kind: 'phone', href: `tel:${encodeURIComponent(p.e164)}`, label: 'חיוג', value: p.display, copy: p.display, source: SOURCE_TEXT[p.source] || '', sourceUrl: safeUrl(p.sourceUrl) });
   }
   for (const e of c.emails || []) {
     if (!EMAIL.test(e.email)) continue;

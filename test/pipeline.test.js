@@ -181,7 +181,7 @@ test('contacts: each business gets its own public contacts, never Freefit\'s', a
       if (exp.booking) assert.ok(c.websites.some((w) => w.kind === 'booking'));
       assert.equal(it.contactKinds.includes('whatsapp'), exp.whatsapp.length > 0);
     }
-    assert.ok(service.status.log.some((l) => /Ignored site-wide contacts: .*972559458809/.test(l)), 'floating Freefit button detected as site-wide');
+    // Freefit's own number is excluded at extraction; the repeat-across-pages rule has its own unit test.
   } finally {
     await mock.close();
   }

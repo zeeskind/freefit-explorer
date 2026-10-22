@@ -3,9 +3,11 @@ import path from 'node:path';
 import { request } from './http.js';
 import { loadFromWpRest } from './sources/wpRest.js';
 import { parseLocationsFilters, discoverClubUrls, crawlMemberships, scrapeClubPages, wpSlugify } from './sources/html.js';
-import { finalizeRecord, mergeRecords, slugFromUrl, safeDecode, toListItem, GROUPS, OTHER_GROUP, PLAN_ORDER } from './normalize.js';
-import { stripSiteWide, mergeContacts, primaryWebsite } from './contacts.js';
+import { finalizeRecord, mergeRecords, slugFromUrl, safeDecode, toListItem, resolveCity, GROUPS, OTHER_GROUP, PLAN_ORDER } from './normalize.js';
+import { stripSiteWide, mergeContacts, primaryWebsite, contactKinds, keepOwnBranch } from './contacts.js';
+import { loadOsmVenues, indexVenues, matchVenue, venueContact, nameTokens } from './sources/osm.js';
 import { SiteCache, crawlSites } from './sources/sites.js';
+import { loadOverrides, matchOverrides, overrideContact } from './overrides.js';
 import { Geocoder, addressQueries } from './geocode.js';
 
 const log = (...a) => console.log(`[${new Date().toISOString().slice(11, 19)}]`, ...a);
@@ -99,6 +101,7 @@ export class DataService {
       this.note(`Could not read /locations/ (${e.message})`);
     }
     const knownCities = filters.city.map((o) => o.label);
+    this.knownCities = knownCities;
     const termNames = {};
     for (const [role, tax] of [['types', 'club-type'], ['styles', 'club-activity']]) {
       for (const o of filters[role]) {
@@ -188,6 +191,22 @@ export class DataService {
     records = stripped.records;
     if (stripped.removed.length) this.note(`Ignored site-wide contacts: ${stripped.removed.join(', ')}`);
 
+    // Manual additions from data/overrides.json come first, so their websites are visited.
+    try {
+      const overrides = await loadOverrides(path.join(this.cfg.dataDir, 'overrides.json'));
+      if (Object.keys(overrides).length) {
+        const { matches, unmatched } = matchOverrides(overrides, records);
+        records = records.map((r) => {
+          const e = matches.get(r.url || String(r.id));
+          return e ? { ...r, contact: mergeContacts(overrideContact(e), r.contact) } : r;
+        });
+        this.note(`overrides: applied ${matches.size} entr${matches.size === 1 ? 'y' : 'ies'}`);
+        for (const u of unmatched) this.note(`overrides: "${u.key}" skipped (${u.reason})`);
+      }
+    } catch (e) {
+      this.note(e.message);
+    }
+
     // Visit each business's own website for more contact details.
     if (this.cfg.crawlSites !== false) records = await this.#enrichFromSites(records);
 
@@ -217,7 +236,8 @@ export class DataService {
       const site = targets.get(r.url);
       if (!site) return r;
       const res = results.get(site);
-      const fromSite = res?.contact ? { ...res.contact, websites: [] } : null; // keep the link Freefit lists
+      // Keep the link Freefit lists; drop numbers the site gives for other branches.
+      const fromSite = res?.contact ? keepOwnBranch({ ...res.contact, websites: [] }, r.city || resolveCity(r.address, this.knownCities || []), this.knownCities || []) : null;
       return {
         ...r,
         contact: mergeContacts(r.contact, fromSite),
@@ -355,6 +375,72 @@ export class DataService {
     if (changed) this.#touch();
     this.note(this.geocoder.summary());
     this.note('Geocoding finished');
+    await this.#enrichFromOsm();
+  }
+
+  /* ------------------------- OpenStreetMap ---------------------------- */
+
+  async #enrichFromOsm() {
+    const osm = this.cfg.osm;
+    if (!osm?.enabled || !osm.endpoints?.length || this.abortGeocode) return;
+    this.setStatus({ state: 'geocoding', phase: 'Matching places with OpenStreetMap', done: 0, total: 0 });
+    let venues;
+    try {
+      venues = await loadOsmVenues({
+        endpoints: osm.endpoints,
+        cacheFile: path.join(this.cfg.dataDir, 'osm-cache.json'),
+        ttlDays: osm.ttlDays ?? 7,
+        userAgent: this.cfg.geocode?.userAgent || 'FreefitExplorer/1.0',
+        log: (m) => this.note(m),
+      });
+    } catch (e) {
+      this.note(`OpenStreetMap contacts unavailable this run: ${e.message}`);
+      return;
+    }
+    if (this.abortGeocode) return;
+    const items = this.dataset.items;
+    const index = indexVenues(venues);
+    // City names are not distinctive: "PURE חיפה" must not match every venue in Haifa.
+    const extraGeneric = new Set((this.dataset.knownCities || []).flatMap((c) => nameTokens(c)));
+    const sites = new Map();
+    let matched = 0;
+    let moved = 0;
+    for (const [n, item] of items.entries()) {
+      if (n % 50 === 0) this.setStatus({ done: n, total: items.length });
+      const m = matchVenue(item, index, { extraGeneric });
+      if (!m) continue;
+      matched++;
+      const c = venueContact(m.venue);
+      item.contact = mergeContacts(item.contact, c);
+      item.osm = { url: `https://www.openstreetmap.org/${m.venue.type}/${m.venue.id}`, name: m.venue.tags.name || m.venue.tags['name:he'] || '', distance: m.distance };
+      if (item.geo === 'city') {
+        Object.assign(item, { lat: m.venue.lat, lng: m.venue.lng, geo: 'osm' });
+        moved++;
+      }
+      const w = primaryWebsite(c);
+      if (w && w.kind !== 'booking' && !item.siteStatus) sites.set(item.id, w.url);
+    }
+    if (sites.size && this.cfg.crawlSites !== false) {
+      await this.siteCache.load();
+      const results = await crawlSites([...sites.values()], {
+        cache: this.siteCache,
+        concurrency: this.cfg.siteConcurrency ?? 6,
+        onProgress: this.progress,
+        log: (m) => this.note(m),
+      });
+      await this.siteCache.save().catch(() => {});
+      for (const item of items) {
+        const url = sites.get(item.id);
+        if (!url) continue;
+        const r = results.get(url);
+        if (r?.contact) item.contact = mergeContacts(item.contact, keepOwnBranch({ ...r.contact, websites: [] }, item.city, this.dataset.knownCities || []));
+        item.siteStatus = { url, ok: !!r?.ok, finalUrl: r?.finalUrl || null, error: r?.ok ? null : r?.error || 'unreachable' };
+      }
+    }
+    for (const item of items) item.contactKinds = contactKinds(item.contact);
+    const has = (k) => items.filter((i) => i.contactKinds.includes(k)).length;
+    this.note(`osm: matched ${matched} of ${items.length} places (${moved} pins moved to the exact venue); now ${has('whatsapp')} with WhatsApp, ${has('phone')} with a phone, ${has('website')} with a website`);
+    this.#touch();
   }
 
   /* ------------------------------- reads ------------------------------- */
